@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Noon AI Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css?v=20">
+</head>
+<body>
+  <div class="page">
+    <div class="glass">
+      <header class="topbar">
+        <div class="brand">
+          <!-- Noon logo -->
+          <div class="noon-logo" aria-label="noon animated logo">
+            <span class="logo-n" aria-hidden="true">n</span>
+            <span class="logo-oon" aria-hidden="true">oon</span>
+          </div>
+          <div class="title">
+            <h1>Noon AI</h1>
+            <p>Audit & Insights Assistant</p>
+          </div>
+        </div>
+        <div class="status">
+          <span class="badge" id="mode" aria-live="polite">Mode: Web</span>
+          <span class="sep">•</span>
+          <span id="status">Ready</span>
+        </div>
+      </header>
+
+      <aside class="rail">
+        <!-- Project picker -->
+        <div class="rail-section">
+          <h3>Project</h3>
+          <select id="project" class="project-select" aria-label="Select project">
+            <option>Inventory Management</option>
+            <option>Order Trend</option>
+            <option>Procure-to-Pay</option>
+            <option>Logistics</option>
+            <option>Marketing Audit</option>
+            <!-- add more as you need -->
+          </select>
+          <p class="small-muted" style="margin-top:8px;">
+            The selection here will be inserted into the prompts below.
+          </p>
+        </div>
+
+        <!-- Audit steps -->
+        <div class="rail-section" id="audit-steps">
+          <h3>Audit Steps</h3>
+          <nav class="rail-nav">
+            <!-- Use {project} placeholder so JS can inject the live project name -->
+            <button class="rail-btn" data-q="Generate a complete RCM for {project} with risks, controls, frequency, owner, evidence, and test steps.">RCM</button>
+            <button class="rail-btn" data-q="Create a detailed data request list for {project}; include tables/files, fields, filters, time-window, owners, format, and data quality checks.">Data Request</button>
+            <button class="rail-btn" id="open-upload">Uploads</button>
+            <button class="rail-btn" data-q="Summarize top observations for {project} from the last 60 days. Then give Risks and actionable Recommendations.">Findings</button>
+            <button class="rail-btn" data-q="Draft an executive audit report outline for {project}: background, scope, method, overall rating, key themes, high/medium findings, management responses (placeholders), next steps.">Report</button>
+          </nav>
+          <div class="history"></div>
+        </div>
+
+        <!-- Presets -->
+        <div class="rail-section">
+          <h4>Presets</h4>
+          <div class="rail-chips">
+            <button class="chip" data-q="Start Marketing Audit for {project} (scope: CAC, retention, ROI). Ask me for the CSV to begin.">Marketing</button>
+            <button class="chip" data-q="Start DevOps Audit for {project} (non-technical overview). List the documentation and metrics we need from each team.">DevOps</button>
+            <button class="chip" data-q="Kick off {project} audit. Generate the RCM first, then a data request list.">Quick Start</button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="content">
+        <!-- Scroller -->
+        <section class="chat" aria-live="polite">
+          <div id="messages" class="messages"></div>
+        </section>
+
+        <!-- Composer -->
+        <section class="composer" role="form" aria-label="Chat composer">
+          <div class="modes-row">
+            <div class="modes" role="tablist" aria-label="Modes">
+              <button class="mode-btn active" data-mode="web" role="tab" aria-selected="true">Web</button>
+              <button class="mode-btn" data-mode="data" role="tab" aria-selected="false">Data</button>
+              <button class="mode-btn" data-mode="analysis" role="tab" aria-selected="false">Analysis</button>
+            </div>
+            <div class="modes-right">
+              <button id="reset-btn" class="reset-btn" title="Reset conversation">Reset</button>
+            </div>
+          </div>
+
+          <div class="input-wrap">
+            <label class="sr-only" for="input">Type your question</label>
+            <textarea id="input" rows="1" placeholder="Type your question…" aria-label="Message input"></textarea>
+            <button id="send" aria-label="Send message">Send</button>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=20"></script>
+</body>
+</html>
