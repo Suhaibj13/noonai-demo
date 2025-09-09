@@ -1,7 +1,8 @@
+# main.py
 from flask import Flask, render_template, request, jsonify
 import pandas as pd
 import numpy as np
-import os, re, difflib, duckdb, requests,math,logging
+import os, re, difflib, duckdb, requests, math, logging
 from dotenv import load_dotenv
 from groq import Groq
 from pathlib import Path
@@ -15,6 +16,9 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 app = Flask(__name__)
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+# Project root (robust paths for Render)
+BASE_DIR = Path(__file__).resolve().parent
 
 def _wants_json() -> bool:
     """
@@ -33,11 +37,12 @@ def _fix_nans(obj):
     if isinstance(obj, dict):
         return {k: _fix_nans(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [ _fix_nans(v) for v in obj ]
+        return [_fix_nans(v) for v in obj]
     return obj
 
 def safe_json(data, status=200):
     return jsonify(_fix_nans(data)), status
+
 # ===============================
 # Conversation & cache (demo)
 # ===============================
@@ -132,7 +137,12 @@ SCHEMA_CONFIG["mg"] = {
 
 INVENTORY_PATH = "inventory.csv"
 ORDERS_PATH    = "orders.csv"
-MG_PATHS = ["minimum_guarantee.csv", "minimum_guarantee.cv", "mg.csv", "mg.cv"]
+MG_PATHS = [
+    "minimum_guarantee.csv", "minimum_guarantee.cv",  # original list
+    "mg.csv", "mg.cv",
+    # extra tolerant variants (won't break existing behavior)
+    "Minimum_Guarantee.csv", "Minimum_Guarantee.CSV"
+]
 
 COLUMN_SYNONYMS = {
     "orders": {
@@ -145,7 +155,6 @@ COLUMN_SYNONYMS = {
         "cost": ["unit_cost", "buy_price"]
     }
 }
-
 COLUMN_SYNONYMS["mg"] = {
     "vendor_name": ["vendor"],
     "fnd_ndr_penalty_amount": ["penalty", "fnd_ndr_penalty"],
@@ -185,17 +194,20 @@ def _enforce_schema(df: pd.DataFrame, table: str) -> pd.DataFrame:
     df = df[spec["columns"]]
     return df
 
-from pathlib import Path
-
 def _read_first(path_list):
+    # Check under BASE_DIR to avoid CWD surprises in prod
     for p in path_list:
-        if Path(p).exists():
-            return pd.read_csv(p)
+        p_abs = (BASE_DIR / p)
+        if p_abs.exists():
+            return pd.read_csv(p_abs)
     return None
 
 def load_data():
-    inv = pd.read_csv(INVENTORY_PATH)
-    ords = pd.read_csv(ORDERS_PATH)
+    inv_path = BASE_DIR / INVENTORY_PATH
+    ord_path = BASE_DIR / ORDERS_PATH
+
+    inv = pd.read_csv(inv_path)
+    ords = pd.read_csv(ord_path)
     mg_raw = _read_first(MG_PATHS)
 
     inv.columns = [c.strip().lower() for c in inv.columns]
@@ -213,7 +225,6 @@ def load_data():
     mg  = _enforce_schema(mg_raw, "mg") if mg_raw is not None else pd.DataFrame(columns=SCHEMA_CONFIG["mg"]["columns"])
     return inv, ords, mg
 
-
 # ===============================
 # SQL helpers
 # ===============================
@@ -223,7 +234,7 @@ def normalize_time_literals(sql: str) -> str:
     sql = re.sub(r"\bCURRENT_DATE\b", "CAST(CURRENT_DATE AS TIMESTAMP)", sql, flags=re.I)
     return sql
 
-def validate_sql_columns(sql: str, inv_cols: list, ord_cols: list,mg_cols: list):
+def validate_sql_columns(sql: str, inv_cols: list, ord_cols: list, mg_cols: list):
     missing = []
     inv_lower = [c.lower() for c in inv_cols]
     ord_lower = [c.lower() for c in ord_cols]
@@ -417,7 +428,7 @@ ORDER BY year_month DESC, units_sold DESC
 # ===============================
 # LLM prompts (SQL + Analysis + Audit/Web)
 # ===============================
-def build_schema_manifest(inv: pd.DataFrame, ords: pd.DataFrame,mg: pd.DataFrame) -> str:
+def build_schema_manifest(inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFrame) -> str:
     def col_line(df, col):
         s = df[col].dropna()
         sample = "" if s.empty else f" sample={repr(str(s.iloc[0])[:40])}"
@@ -435,7 +446,7 @@ def build_schema_manifest(inv: pd.DataFrame, ords: pd.DataFrame,mg: pd.DataFrame
     return "\n".join(lines)
 
 SQL_SYSTEM_PROMPT = """
-You are SAGE-SQL for DuckDB.
+You are Noon-SQL for DuckDB.
 Return EXACTLY ONE valid SQL SELECT statement and nothing else.
 Ignore phrasing like "give me" or "analyze": always produce the best SELECT over the provided schema.
 Use ONLY the provided tables and columns. No DDL/DML. No comments. No code fences.
@@ -444,7 +455,7 @@ When comparing to TIMESTAMP columns, cast NOW()/CURRENT_TIMESTAMP/CURRENT_DATE t
 """
 
 ANALYSIS_SQL_SYSTEM_PROMPT = """
-You are SAGE-SQL for DuckDB.
+You are Noon-SQL for DuckDB.
 Return EXACTLY ONE valid SQL SELECT statement and nothing else.
 Goal: produce a compact, analysis-ready dataset (aggregations/trends) for the question.
 Prefer GROUP BY (e.g., by month and/or user_id) rather than raw row dumps.
@@ -468,7 +479,7 @@ A: SELECT date_trunc('month', created_at) AS month, product_id, COUNT(*) AS unit
 
 # ---- Analysis style (no O/R/R) ----
 ANALYSIS_ASSISTANT_PROMPT = """
-You are SAGE-Analysis, a data insights assistant.
+You are Noon-Analysis, a data insights assistant.
 Write concise, factual insights grounded in the provided summary and sample rows.
 Highlight trends, seasonality, top/bottom drivers, notable outliers, and data-quality gaps.
 Avoid "Observation/Risk/Recommendation" formatting. No bullet labels. Be crisp.
@@ -476,7 +487,7 @@ Avoid "Observation/Risk/Recommendation" formatting. No bullet labels. Be crisp.
 
 # ---- Web mode audit formatter (only when 'observation(s)' requested) ----
 AUDIT_FORMAT_PROMPT = """
-You are SAGE-Audit.
+You are Noon-Audit.
 When the user asks for observations, output MUST follow exactly:
 
 Observation 1
@@ -492,8 +503,16 @@ No extra headings or prose outside that structure.
 """
 
 ONLINE_SYSTEM_PROMPT = """
-You are SAGE, a concise assistant. Provide a brief, accurate answer using general knowledge or reputable public sources.
-Be direct and avoid filler.
+You are Noon-Info, an information expert.
+Provide a comprehensive, well-structured, neutral explanation for the user's question.
+Include when relevant:
+- a clear definition or overview
+- key concepts and components
+- step-by-step process or examples
+- important caveats, trade-offs, or limitations
+- brief practical tips or best practices
+
+Avoid auditspeak. Be thorough but stay clear and readable.
 """
 
 # ===============================
@@ -694,18 +713,26 @@ def run_data_flow(user_query: str, *, analysis_style: bool = False):
     global last_result_df, last_result_sql, last_result_query
 
     inv, ords, mg = load_data()
-    manifest = build_schema_manifest(inv, ords,mg)
+    manifest = build_schema_manifest(inv, ords, mg)
 
-    # Rules → else LLM
+    # Rules → else LLM (fallback safely if Groq unavailable)
     if not sql:
         sys_prompt = ANALYSIS_SQL_SYSTEM_PROMPT if analysis_style else SQL_SYSTEM_PROMPT
-        sql = llm_generate_sql_with_prompt(user_query, manifest, sys_prompt)
+        try:
+            sql = llm_generate_sql_with_prompt(user_query, manifest, sys_prompt)
+        except Exception as llm_ex:
+            logging.exception("LLM SQL generation failed; using default query")
+            sql = default_orders_sql()
 
     sql = normalize_time_literals(clean_sql_output(sql)) or default_orders_sql()
 
     # Schema validation
-    is_valid, missing_cols = validate_sql_columns(sql,
-        SCHEMA_CONFIG["inventory"]["columns"], SCHEMA_CONFIG["orders"]["columns"],SCHEMA_CONFIG["mg"]["columns"])
+    is_valid, missing_cols = validate_sql_columns(
+        sql,
+        SCHEMA_CONFIG["inventory"]["columns"],
+        SCHEMA_CONFIG["orders"]["columns"],
+        SCHEMA_CONFIG["mg"]["columns"]
+    )
     if not is_valid:
         suggestions = suggest_similar_columns(
             missing_cols=sorted(set(missing_cols)),
@@ -713,10 +740,17 @@ def run_data_flow(user_query: str, *, analysis_style: bool = False):
             tables_to_dfs={"orders": ords, "inventory": inv, "mg": mg},
             synonyms_map=COLUMN_SYNONYMS, max_suggestions=5
         )
-        repaired = llm_repair_sql(sql, "Missing columns: " + ", ".join(sorted(set(missing_cols))), manifest)
-        repaired = normalize_time_literals(clean_sql_output(repaired)) or sql
-        ok2, _ = validate_sql_columns(repaired,
-            SCHEMA_CONFIG["inventory"]["columns"], SCHEMA_CONFIG["orders"]["columns"],SCHEMA_CONFIG["mg"]["columns"])
+        try:
+            repaired = llm_repair_sql(sql, "Missing columns: " + ", ".join(sorted(set(missing_cols))), manifest)
+            repaired = normalize_time_literals(clean_sql_output(repaired)) or sql
+        except Exception:
+            repaired = sql
+        ok2, _ = validate_sql_columns(
+            repaired,
+            SCHEMA_CONFIG["inventory"]["columns"],
+            SCHEMA_CONFIG["orders"]["columns"],
+            SCHEMA_CONFIG["mg"]["columns"]
+        )
         if ok2:
             sql = repaired
         else:
@@ -732,10 +766,13 @@ def run_data_flow(user_query: str, *, analysis_style: bool = False):
     try:
         df = run_sql(sql, inv, ords, mg)
     except Exception as ex:
-        repaired = llm_repair_sql(sql, str(ex), manifest)
-        repaired = normalize_time_literals(clean_sql_output(repaired)) or sql
         try:
-            df = run_sql(repaired, inv, ords,mg)
+            repaired = llm_repair_sql(sql, str(ex), manifest)
+            repaired = normalize_time_literals(clean_sql_output(repaired)) or sql
+        except Exception:
+            repaired = sql
+        try:
+            df = run_sql(repaired, inv, ords, mg)
             sql = repaired
         except Exception as ex2:
             return {"reply": f"Query error: {ex2}", "sql": sql, "preview": None}
@@ -845,7 +882,7 @@ def run_web_flow(user_query: str):
             {"role": "system", "content": AUDIT_FORMAT_PROMPT},
             {"role": "user", "content": prompt}
         ]
-        resp = client.chat.completions.create(  # <-- fixed below to .chat.completions
+        resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile", messages=msgs, temperature=0
         )
         return {"reply": resp.choices[0].message.content.strip(), "sql": None, "preview": None}
@@ -882,11 +919,27 @@ AUTO_PROMPTS_BY_STEP = {
 # ===============================
 @app.route("/")
 def root():
-    tpl = Path("templates/index.html")
+    tpl = (BASE_DIR / "templates" / "index.html")
     if tpl.exists():
         return render_template("index.html")
-    f = Path("index.html")
-    return f.read_text(encoding="utf-8") if f.exists() else "<h1>SAGE</h1>"
+    f = BASE_DIR / "index.html"
+    return f.read_text(encoding="utf-8") if f.exists() else "<h1>Noon</h1>"
+
+@app.get("/healthz")
+def healthz():
+    try:
+        # Try to read once to verify availability
+        inv, ords, mg = load_data()
+        shapes = {
+            "inventory": list(inv.shape) if isinstance(inv, pd.DataFrame) else None,
+            "orders": list(ords.shape) if isinstance(ords, pd.DataFrame) else None,
+            "mg": list(mg.shape) if isinstance(mg, pd.DataFrame) else None
+        }
+        ok = all(shapes.get(k) for k in ("orders", "inventory", "mg"))
+        return safe_json({"ok": ok, "shapes": shapes}, 200 if ok else 500)
+    except Exception:
+        logging.exception("healthz failed")
+        return safe_json({"ok": False}, 500)
 
 @app.post("/run_step")
 def run_step():
@@ -968,7 +1021,7 @@ def _err_500(e):
     if _wants_json():
         return safe_json({"ok": False, "error": "Server Error", "code": 500}, 500)
     return ("Server Error", 500)
-    
+
 # ===============================
 # Entrypoint
 # ===============================
