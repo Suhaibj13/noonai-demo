@@ -63,13 +63,14 @@ async function send(){
   addTyping();
 
   try{
-    const res = await fetch("/ask", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ query: q, mode: state.mode })
-    });
-    const data = await res.json();
+    const data = await window.fetchJson("/ask", {
+    method: "POST",
+    headers: { "Content-Type":"application/json", "Accept":"application/json" },
+    body: JSON.stringify({ query: q, mode: state.mode })
+  });
     removeTyping();
+    addMessage("ai", String(data.reply ?? "(no reply)")).trim?.();
+    if (statusEl) statusEl.textContent = "Ready";
 
     if (!res.ok || data?.reply === undefined){
       addMessage("ai", "Error: No response");
@@ -92,12 +93,11 @@ async function send(){
 async function resetConversation(){
   messagesEl.innerHTML = "";
   try{
-    const res = await fetch("/ask", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ query: "reset", mode: state.mode })
-    });
-    const data = await res.json();
+    const data = await window.fetchJson("/ask", {
+    method: "POST",
+    headers: { "Content-Type":"application/json", "Accept":"application/json" },
+    body: JSON.stringify({ query: q, mode: state.mode })
+  });
     addMessage("ai", data?.reply || "Started a new chat.");
   }catch(_){
     addMessage("ai", "Started a new chat.");
@@ -156,21 +156,14 @@ document.querySelectorAll("#audit-steps .rail-btn[data-step]").forEach(btn => {
     addTyping();
 
     try {
-      const res = await fetch("/run_step", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ step, project })
-      });
-      const data = await res.json();
-      removeTyping();
-
-      if (!res.ok) {
-        addMessage("ai", data?.reply || "Error running step.");
-        if (statusEl) statusEl.textContent = "Error";
-      } else {
-        addMessage("ai", String(data.reply || "(no reply)").trim());
-        if (statusEl) statusEl.textContent = "Ready";
-      }
+      const data = await window.fetchJson("/run_step", {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "Accept":"application/json" },
+      body: JSON.stringify({ step, project })
+    });
+    removeTyping();
+    addMessage("ai", String(data.reply ?? "(no reply)").trim());
+    if (statusEl) statusEl.textContent = "Ready";
     } catch (e) {
       removeTyping();
       addMessage("ai", `Error: ${e.message}`);
@@ -209,21 +202,15 @@ document.querySelectorAll("[data-q]").forEach(btn => {
     if (statusEl) statusEl.textContent = "Processing…";
     addTyping();
 
-    fetch("/ask", {
+    window.fetchJson("/ask", {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: { "Content-Type":"application/json", "Accept":"application/json" },
       body: JSON.stringify({ query: q, mode: state.mode })
     })
-    .then(res => res.json().then(data => ({ ok: res.ok, data })))
-    .then(({ ok, data }) => {
+    .then((data) => {
       removeTyping();
-      if (!ok || data?.reply === undefined) {
-        addMessage("ai", "Error: No response");
-        if (statusEl) statusEl.textContent = "Error";
-      } else {
-        addMessage("ai", String(data.reply).trim());
-        if (statusEl) statusEl.textContent = "Ready";
-      }
+      addMessage("ai", String(data.reply ?? "(no reply)").trim());
+      if (statusEl) statusEl.textContent = "Ready";
     })
     .catch(e => {
       removeTyping();
