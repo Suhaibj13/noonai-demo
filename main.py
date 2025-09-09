@@ -927,6 +927,18 @@ def ask():
         push_history(user_query, err)
         return jsonify({"reply": err})
 
+@app.errorhandler(500)
+def _err_500(e):
+    if request.path in ("/ask", "/run_step"):
+        return jsonify(ok=False, error="Server Error"), 500
+    return ("Server Error", 500)
+
+@app.errorhandler(404)
+def _err_404(e):
+    if request.path in ("/ask", "/run_step"):
+        return jsonify(ok=False, error="Not Found"), 404
+    return ("Not Found", 404)
+    
 # ===============================
 # Entrypoint
 # ===============================
