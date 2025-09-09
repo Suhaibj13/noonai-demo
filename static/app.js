@@ -1,4 +1,4 @@
-// ===== SAGE Frontend – final scroll + logo-safe settings =====
+// ===== SAGE Frontend – final scroll + logo-safe settings (fixed JSON handling) =====
 const $ = (sel) => document.querySelector(sel);
 const messagesEl = $("#messages");
 const inputEl = $("#input");
@@ -9,6 +9,7 @@ const resetBtn = $("#reset-btn");
 
 const state = { sending: false, mode: "web", history: [] };
 
+// Mode switching
 function setMode(newMode){
   state.mode = newMode;
   document.querySelectorAll(".mode-btn").forEach(btn => {
@@ -25,6 +26,7 @@ function setMode(newMode){
   if (modeLabelEl) modeLabelEl.textContent = `Mode: ${newMode[0].toUpperCase()}${newMode.slice(1)}`;
 }
 
+// Chat helpers
 function addMessage(role, content){
   state.history.push({ role, content });
   const wrap = document.createElement("div");
@@ -50,6 +52,19 @@ function addTyping(){
 }
 function removeTyping(){ document.getElementById("typing")?.remove(); }
 
+function scroller() {
+  return document.querySelector(".chat");
+}
+
+// Ensure chat area never hides under composer
+function updateComposerOffset(){
+  const comp = document.querySelector(".composer");
+  const px = comp ? comp.offsetHeight + 24 : 160;
+  document.documentElement.style.setProperty("--composer-offset", px + "px");
+  scroller().scrollTop = scroller().scrollHeight;
+}
+
+// Send handler (uses /ask)
 async function send(){
   const q = (inputEl.value || "").trim();
   if (!q || state.sending) return;
@@ -63,57 +78,42 @@ async function send(){
   addTyping();
 
   try{
-    const res = await fetch("/ask", {
+    const data = await window.fetchJson("/ask", {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: { "Content-Type":"application/json", "Accept":"application/json" },
       body: JSON.stringify({ query: q, mode: state.mode })
     });
-    const data = await res.json();
     removeTyping();
-
-    if (!res.ok || data?.reply === undefined){
-      addMessage("ai", "Error: No response");
-      if (statusEl) statusEl.textContent = "Error";
-    }else{
-      addMessage("ai", String(data.reply).trim());
-      if (statusEl) statusEl.textContent = "Ready";
-    }
-  }catch(e){
+    addMessage("ai", String((data.reply ?? "(no reply)")).trim());
+    if (statusEl) statusEl.textContent = "Ready";
+  } catch(e){
     removeTyping();
     addMessage("ai", `Error: ${e.message}`);
     if (statusEl) statusEl.textContent = "Error";
-  }finally{
+  } finally{
     state.sending = false;
     sendBtn.disabled = false;
     scroller().scrollTop = scroller().scrollHeight;
   }
 }
 
+// Reset conversation (posts "reset" via /ask)
 async function resetConversation(){
   messagesEl.innerHTML = "";
   try{
-    const res = await fetch("/ask", {
+    const data = await window.fetchJson("/ask", {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: { "Content-Type":"application/json", "Accept":"application/json" },
       body: JSON.stringify({ query: "reset", mode: state.mode })
     });
-    const data = await res.json();
-    addMessage("ai", data?.reply || "Started a new chat.");
+    addMessage("ai", String((data?.reply ?? "Started a new chat.")).trim());
   }catch(_){
     addMessage("ai", "Started a new chat.");
   }
   inputEl.focus();
 }
 
-/* Dynamic bottom padding so chat never hides under composer */
-function updateComposerOffset(){
-  const comp = document.querySelector(".composer");
-  const px = comp ? comp.offsetHeight + 24 : 160;
-  document.documentElement.style.setProperty("--composer-offset", px + "px");
-  scroller().scrollTop = scroller().scrollHeight;
-}
-
-/* Events */
+// Events
 sendBtn.addEventListener("click", send);
 inputEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
@@ -124,21 +124,11 @@ inputEl.addEventListener("input", () => {
   updateComposerOffset();
 });
 resetBtn.addEventListener("click", resetConversation);
-document.querySelectorAll(".mode-btn").forEach(btn => btn.addEventListener("click", () => setMode(btn.dataset.mode)));
+document.querySelectorAll(".mode-btn").forEach(btn =>
+  btn.addEventListener("click", () => setMode(btn.dataset.mode))
+);
 
 window.addEventListener("load", () => { setMode(state.mode); updateComposerOffset(); });
-window.addEventListener("resize", updateComposerOffset);
-
-function scroller() {
-  return document.querySelector(".chat");
-}
-function updateComposerOffset() {
-  const comp = document.querySelector(".composer");
-  const px = comp ? comp.offsetHeight + 24 : 160; // breathing room
-  document.documentElement.style.setProperty("--composer-offset", px + "px");
-  scroller().scrollTop = scroller().scrollHeight;
-}
-window.addEventListener("load", updateComposerOffset);
 window.addEventListener("resize", updateComposerOffset);
 
 // --- Audit Steps wiring ---
@@ -147,30 +137,22 @@ const projectSel = document.querySelector("#project");
 document.querySelectorAll("#audit-steps .rail-btn[data-step]").forEach(btn => {
   btn.addEventListener("click", async () => {
     const step = (btn.dataset.step || "").trim(); // rcm | data_request | findings | report
-    if (!step) return; // safety: don't fire if attribute missing
+    if (!step) return;
 
     const project = projectSel ? projectSel.value : "Inventory Management";
-    // Optional: show what we're doing in the transcript
     addMessage("user", `Run "${step}" for project: ${project}`);
     if (statusEl) statusEl.textContent = `Running ${step}…`;
     addTyping();
 
     try {
-      const res = await fetch("/run_step", {
+      const data = await window.fetchJson("/run_step", {
         method: "POST",
-        headers: {"Content-Type": "application/json"},
+        headers: { "Content-Type":"application/json", "Accept":"application/json" },
         body: JSON.stringify({ step, project })
       });
-      const data = await res.json();
       removeTyping();
-
-      if (!res.ok) {
-        addMessage("ai", data?.reply || "Error running step.");
-        if (statusEl) statusEl.textContent = "Error";
-      } else {
-        addMessage("ai", String(data.reply || "(no reply)").trim());
-        if (statusEl) statusEl.textContent = "Ready";
-      }
+      addMessage("ai", String((data.reply ?? "(no reply)")).trim());
+      if (statusEl) statusEl.textContent = "Ready";
     } catch (e) {
       removeTyping();
       addMessage("ai", `Error: ${e.message}`);
@@ -179,10 +161,9 @@ document.querySelectorAll("#audit-steps .rail-btn[data-step]").forEach(btn => {
   });
 });
 
-/* ===========================
-   Project-aware presets
-   =========================== */
-// Helper: inject current project into {project} placeholder or prefix if absent
+// ===========================
+// Project-aware presets
+// ===========================
 function materializePrompt(tpl) {
   const sel = document.querySelector("#project");
   const project = sel ? sel.value : "Inventory Management";
@@ -209,21 +190,15 @@ document.querySelectorAll("[data-q]").forEach(btn => {
     if (statusEl) statusEl.textContent = "Processing…";
     addTyping();
 
-    fetch("/ask", {
+    window.fetchJson("/ask", {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: { "Content-Type":"application/json", "Accept":"application/json" },
       body: JSON.stringify({ query: q, mode: state.mode })
     })
-    .then(res => res.json().then(data => ({ ok: res.ok, data })))
-    .then(({ ok, data }) => {
+    .then((data) => {
       removeTyping();
-      if (!ok || data?.reply === undefined) {
-        addMessage("ai", "Error: No response");
-        if (statusEl) statusEl.textContent = "Error";
-      } else {
-        addMessage("ai", String(data.reply).trim());
-        if (statusEl) statusEl.textContent = "Ready";
-      }
+      addMessage("ai", String((data.reply ?? "(no reply)")).trim());
+      if (statusEl) statusEl.textContent = "Ready";
     })
     .catch(e => {
       removeTyping();
