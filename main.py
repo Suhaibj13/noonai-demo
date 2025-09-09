@@ -14,7 +14,30 @@ load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 app = Flask(__name__)
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
+def _wants_json() -> bool:
+    """
+    Treat chat endpoints as API. If Accept header asks for JSON, honor it too.
+    """
+    try:
+        if request.path in ("/ask", "/run_step"):
+            return True
+        return "application/json" in (request.headers.get("Accept") or "")
+    except Exception:
+        return False
+
+def _fix_nans(obj):
+    if isinstance(obj, float) and math.isnan(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _fix_nans(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [ _fix_nans(v) for v in obj ]
+    return obj
+
+def safe_json(data, status=200):
+    return jsonify(_fix_nans(data)), status
 # ===============================
 # Conversation & cache (demo)
 # ===============================
@@ -927,17 +950,24 @@ def ask():
         push_history(user_query, err)
         return jsonify({"reply": err})
 
-@app.errorhandler(500)
-def _err_500(e):
-    if request.path in ("/ask", "/run_step"):
-        return jsonify(ok=False, error="Server Error"), 500
-    return ("Server Error", 500)
-
 @app.errorhandler(404)
 def _err_404(e):
-    if request.path in ("/ask", "/run_step"):
-        return jsonify(ok=False, error="Not Found"), 404
+    if _wants_json():
+        return safe_json({"ok": False, "error": "Not Found", "code": 404}, 404)
     return ("Not Found", 404)
+
+@app.errorhandler(405)
+def _err_405(e):
+    if _wants_json():
+        return safe_json({"ok": False, "error": "Method Not Allowed", "code": 405}, 405)
+    return ("Method Not Allowed", 405)
+
+@app.errorhandler(500)
+def _err_500(e):
+    app.logger.exception("Internal Server Error")
+    if _wants_json():
+        return safe_json({"ok": False, "error": "Server Error", "code": 500}, 500)
+    return ("Server Error", 500)
     
 # ===============================
 # Entrypoint
