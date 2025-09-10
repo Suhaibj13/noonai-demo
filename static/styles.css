@@ -19,7 +19,8 @@ body{
 
 /* Glass */
 .glass{
-  position:fixed; inset:40px 80px;
+  position:fixed; 
+  #inset:40px 80px;
   display:grid; grid-template-columns:280px 1fr; grid-template-rows:auto 1fr;
   border-radius:16px; border:1px solid rgba(255,255,255,.16);
   background:rgba(20,24,32,.35);
