@@ -417,14 +417,14 @@ def build_schema_manifest(inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFram
     return "\n".join(lines)
 
 SQL_SYSTEM_PROMPT = """
-You are SAGE-SQL for DuckDB.
+You are Noon-SQL for DuckDB.
 Return EXACTLY ONE valid SQL SELECT statement and nothing else.
 Use ONLY the provided tables and columns. No DDL/DML. No comments. No code fences.
 When comparing to TIMESTAMP columns, cast NOW()/CURRENT_TIMESTAMP/CURRENT_DATE to TIMESTAMP.
 """
 
 ANALYSIS_SQL_SYSTEM_PROMPT = """
-You are SAGE-SQL for DuckDB.
+You are Noon-SQL for DuckDB.
 Return EXACTLY ONE valid SQL SELECT statement for analysis (aggregations/trends).
 Prefer GROUP BY (e.g., by month, user_id) over raw row dumps. No comments or code fences.
 """
@@ -524,10 +524,10 @@ def pre_analyze(df: pd.DataFrame) -> dict:
     return out
 
 # Prompts
-ANALYSIS_ASSISTANT_PROMPT = "You are SAGE-Analysis. Provide concise, factual insights grounded in the provided data."
+ANALYSIS_ASSISTANT_PROMPT = "You are Noon-Analysis. Provide concise, factual insights grounded in the provided data."
 
 AUDIT_FORMAT_PROMPT = """
-You are SAGE-Audit.
+You are Noon-Audit.
 When the user asks for observations, output MUST follow exactly:
 
 Observation 1
@@ -540,7 +540,7 @@ Recommendation
 """
 
 INFO_SYSTEM_PROMPT = """
-You are SAGE-Info, an information expert.
+You are Noon-Info, an information expert.
 Provide a comprehensive, well-structured, neutral explanation for the user's question.
 Include when relevant: definition/overview, key concepts, step-by-step examples, caveats/trade-offs, and practical tips.
 Avoid auditspeak. Be thorough but clear.
