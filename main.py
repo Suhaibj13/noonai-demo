@@ -19,6 +19,34 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 BASE_DIR = Path(__file__).resolve().parent  # /opt/render/project/src (Render)
 
+from werkzeug.exceptions import HTTPException, BadRequest
+app.config["PROPAGATE_EXCEPTIONS"] = False
+app.config["TRAP_HTTP_EXCEPTIONS"] = True
+
+def _wants_json() -> bool:
+    try:
+        return request.path in ("/ask", "/run_step") or \
+               "application/json" in (request.headers.get("Accept") or "")
+    except Exception:
+        return False
+
+@app.errorhandler(HTTPException)
+def _err_http(e: HTTPException):
+    # 404/405/etc. -> JSON for chat endpoints
+    if _wants_json():
+        return safe_json({"ok": False, "error": e.description, "code": e.code}, e.code)
+    return e
+
+@app.errorhandler(Exception)
+def _err_any(e):
+    # Absolutely everything else -> JSON for chat endpoints
+    if _wants_json():
+        logging.exception("Unhandled exception")
+        code = getattr(e, "code", 500)
+        return safe_json({"ok": False, "error": str(e), "code": code}, code)
+    # Let Flask show HTML only for non-API pages
+    raise e
+    
 # ===============================
 # JSON helpers & error handling
 # ===============================
@@ -763,29 +791,33 @@ def run_step():
 
 @app.post("/ask")
 def ask():
-    body = request.get_json(force=True) or {}
-    user_query = (body.get("query") or "").strip()
-    mode = (body.get("mode") or "data").lower()
-    if not user_query:
-        return safe_json({"ok": True, "reply": "Please enter a question."})
-    if user_query.lower() in {"new chat","/new","reset"}:
-        conversation_history.clear()
-        global last_result_df, last_result_sql, last_result_query
-        last_result_df = last_result_sql = last_result_query = None
-        return safe_json({"ok": True, "reply": "Started a new chat."})
-
-    # Specific quick intent: total customer count
-    if mode in ("data","analysis") and "total customer" in user_query.lower():
+    try:
         try:
+            body = request.get_json(force=False, silent=False)
+        except BadRequest as be:
+            # Bad JSON from client
+            return safe_json({"ok": False, "error": f"Invalid JSON body: {be}"} , 400)
+
+        body = body or {}
+        user_query = (body.get("query") or "").strip()
+        mode = (body.get("mode") or "data").lower()
+
+        if not user_query:
+            return safe_json({"ok": True, "reply": "Please enter a question."})
+
+        if user_query.lower() in {"new chat", "/new", "reset"}:
+            conversation_history.clear()
+            global last_result_df, last_result_sql, last_result_query
+            last_result_df = last_result_sql = last_result_query = None
+            return safe_json({"ok": True, "reply": "Started a new chat."})
+
+        # Quick intent to keep you moving even if LLM/SQL hiccups
+        if mode in ("data","analysis") and "total customer" in user_query.lower():
             inv, ords, mg = load_data()
             count = int(ords["user_id"].dropna().nunique())
             push_history(user_query, f"Total distinct customers: {count}")
             return safe_json({"ok": True, "reply": f"Total distinct customers: {count}", "sql": None})
-        except Exception as e:
-            logging.exception("fallback total customer count failed")
-            return safe_json({"ok": False, "error": f"Failed to compute: {e}"}, 500)
 
-    try:
         if mode == "data":
             res = run_data_flow(user_query, analysis_style=False)
         elif mode == "analysis":
@@ -795,9 +827,18 @@ def ask():
         else:
             res = run_data_flow(user_query, analysis_style=False)
             res["reply"] = f"(demo) Unknown mode '{mode}'. Defaulted to Data.\n\n{res['reply']}"
+
         push_history(user_query, trim_text(res.get("reply",""), 500))
-        return safe_json({"ok": True, "reply": res.get("reply",""), "sql": res.get("sql"), "preview": res.get("preview"), "mode": mode})
+        return safe_json({
+            "ok": True,
+            "reply": res.get("reply",""),
+            "sql": res.get("sql"),
+            "preview": res.get("preview"),
+            "mode": mode
+        })
+
     except Exception as e:
+        # Any unexpected error becomes JSON (and is also caught by the global handler)
         logging.exception("ask failed")
         return safe_json({"ok": False, "error": str(e)}, 500)
 
