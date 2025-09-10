@@ -1,4 +1,23 @@
 // ===== SAGE Frontend – final scroll + logo-safe settings (fixed JSON handling) =====
+// --- safety: define fetchJson if the helper file didn't load ---
+if (!window.fetchJson) {
+  window.fetchJson = async function fetchJson(input, init) {
+    const res = await fetch(input, init);
+    const text = await res.text();
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    const isJson = ct.includes("application/json");
+    if (!res.ok || !isJson) {
+      const snippet = text.slice(0, 300);
+      throw new Error(`HTTP ${res.status} ${res.statusText} — Not JSON\n${snippet}`);
+    }
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error(`JSON parse error: ${e.message}\nSnippet: ${text.slice(0, 300)}`);
+    }
+  };
+}
+
 const $ = (sel) => document.querySelector(sel);
 const messagesEl = $("#messages");
 const inputEl = $("#input");
