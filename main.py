@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from groq import Groq
 from pathlib import Path
 from datetime import timedelta
+import traceback
+from werkzeug.exceptions import HTTPException
 
 # ===============================
 # Load env & init client
@@ -194,6 +196,8 @@ def _enforce_schema(df: pd.DataFrame, table: str) -> pd.DataFrame:
     df = df[spec["columns"]]
     return df
 
+BASE_DIR = Path(__file__).resolve().parent
+
 def _read_first(path_list):
     # Check under BASE_DIR to avoid CWD surprises in prod
     for p in path_list:
@@ -203,12 +207,15 @@ def _read_first(path_list):
     return None
 
 def load_data():
-    inv_path = BASE_DIR / INVENTORY_PATH
-    ord_path = BASE_DIR / ORDERS_PATH
+    #inv_path = BASE_DIR / INVENTORY_PATH
+    #ord_path = BASE_DIR / ORDERS_PATH
 
-    inv = pd.read_csv(inv_path)
-    ords = pd.read_csv(ord_path)
-    mg_raw = _read_first(MG_PATHS)
+    inv = pd.read_csv(BASE_DIR / "inventory.csv")
+    ords = pd.read_csv(BASE_DIR / "orders.csv")
+    mg_raw = pd.read_csv(BASE_DIR / "minimum_guarantee.csv")
+
+    # … keep your existing alias + schema enforcement …
+    return inv, ords, mg
 
     inv.columns = [c.strip().lower() for c in inv.columns]
     ords.columns = [c.strip().lower() for c in ords.columns]
@@ -928,18 +935,24 @@ def root():
 @app.get("/healthz")
 def healthz():
     try:
-        # Try to read once to verify availability
         inv, ords, mg = load_data()
         shapes = {
             "inventory": list(inv.shape) if isinstance(inv, pd.DataFrame) else None,
             "orders": list(ords.shape) if isinstance(ords, pd.DataFrame) else None,
             "mg": list(mg.shape) if isinstance(mg, pd.DataFrame) else None
         }
-        ok = all(shapes.get(k) for k in ("orders", "inventory", "mg"))
+        ok = all(shapes.get(k) for k in ("orders","inventory","mg"))
         return safe_json({"ok": ok, "shapes": shapes}, 200 if ok else 500)
-    except Exception:
+    except Exception as e:
         logging.exception("healthz failed")
-        return safe_json({"ok": False}, 500)
+        return safe_json({"ok": False, "error": str(e)}, 500)
+
+@app.get("/diagz")
+def diagz():
+    # Quick check of working dir and files Render can see
+    here = Path(__file__).resolve().parent
+    files = sorted([p.name for p in here.glob("*")])
+    return safe_json({"cwd": str(here), "files": files})
 
 @app.post("/run_step")
 def run_step():
@@ -1022,6 +1035,16 @@ def _err_500(e):
         return safe_json({"ok": False, "error": "Server Error", "code": 500}, 500)
     return ("Server Error", 500)
 
+@app.errorhandler(Exception)
+def _err_any(e):
+    # Don’t mask HTTPExceptions (404/405 etc.) – just reformat as JSON for chat endpoints
+    code = getattr(e, "code", 500) if isinstance(e, HTTPException) else 500
+    if request.path in ("/ask", "/run_step") or "application/json" in (request.headers.get("Accept") or ""):
+        logging.exception("Unhandled exception")
+        return safe_json({"ok": False, "error": str(e), "code": code}, code)
+    # Non-API: let Flask default page show
+    raise e
+    
 # ===============================
 # Entrypoint
 # ===============================
