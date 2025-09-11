@@ -235,6 +235,10 @@ def load_data():
     # Return dataframes + lightweight meta so /healthz can show what happened
     return inv, ords, mg, {"inventory": inv_meta, "orders": ord_meta, "mg": mg_meta}
 
+def load_data_for_routes():
+    inv, ords, mg, _ = load_data()
+    return inv, ords, mg
+    
 # ============ SQL helpers & rules ============
 def normalize_time_literals(sql: str) -> str:
     sql = re.sub(r"\bCURRENT_TIMESTAMP\b", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)", sql, flags=re.I)
@@ -479,7 +483,7 @@ def run_sql(sql: str, inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFrame) -
     return con.execute(sql).fetchdf()
 
 def build_schema_and_sql(user_query: str, analysis_style: bool):
-    inv, ords, mg = load_data()
+    inv, ords, mg = load_data_for_routes()
     manifest = build_schema_manifest(inv, ords, mg)
     sql = (rule_mg_sql(user_query) or rule_inventory_sql(user_query) or rule_orders_by_value_desc(user_query))
     if not sql:
@@ -616,7 +620,7 @@ def ask():
 
     # Quick intent that must always work
     if mode in ("data","analysis") and "total customer" in user_query.lower():
-        inv, ords, mg = load_data()
+        inv, ords, mg = load_data_for_routes()
         count = int(ords["user_id"].dropna().nunique())
         return safe_json({"ok": True, "reply": f"Total distinct customers: {count}", "sql": None})
 
