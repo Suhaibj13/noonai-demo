@@ -7,6 +7,8 @@ from datetime import timedelta
 import pandas as pd
 import numpy as np
 
+# Make dtype coercion optional to reduce memory pressure in prod
+COERCE_DTYPES = bool(int(os.getenv("COERCE_DTYPES", "0")))  # 0 = off (light mode), 1 = on
 # ============ Optional LLM client (only used if key is set) ============
 try:
     from groq import Groq
@@ -127,30 +129,47 @@ def _apply_aliases(df: pd.DataFrame, aliases: dict) -> pd.DataFrame:
     return df.rename(columns=to_rename) if to_rename else df
 
 def _enforce_schema(df: pd.DataFrame, table: str) -> pd.DataFrame:
+    """
+    Light mode (default): only ensure required columns exist and order them.
+    This avoids costly pandas dtype conversions that can OOM on small instances.
+
+    If COERCE_DTYPES=1, we do a gentler coercion (datetime via utc path; numeric with errors='coerce').
+    """
     spec = SCHEMA_CONFIG[table]
+
+    # 1) Ensure all expected columns exist
     for col in spec["columns"]:
         if col not in df.columns:
             df[col] = pd.NA
-    for col, dt in spec["dtypes"].items():
-        if col not in df.columns: continue
-        try:
-            if dt == "datetime64[ns]":
-                df[col] = pd.to_datetime(df[col], errors="coerce").dt.tz_localize(None)
-            elif dt in ("Int64","Float64"):
-                df[col] = pd.to_numeric(df[col], errors="coerce").astype(dt)
-            elif dt == "string":
-                df[col] = df[col].astype("string")
-            else:
-                df[col] = df[col].astype(dt)
-        except Exception:
-            pass
+
+    # 2) Optional, gentler coercion (OFF by default)
+    if COERCE_DTYPES:
+        for col, dt in spec["dtypes"].items():
+            if col not in df.columns:
+                continue
+            try:
+                if dt == "datetime64[ns]":
+                    # Lighter datetime path: coerce with UTC, then drop tz
+                    s = pd.to_datetime(df[col], errors="coerce", utc=True)
+                    df[col] = s.dt.tz_convert(None)
+                elif dt in ("Int64", "Float64"):
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype(dt)
+                elif dt == "string":
+                    df[col] = df[col].astype("string")
+                else:
+                    df[col] = df[col].astype(dt)
+            except Exception:
+                # If anything goes wrong, keep original values (don’t crash / OOM)
+                pass
+
+    # 3) Return columns in the canonical order
     return df[spec["columns"]]
 
 def _read_first(path_list):
     for p in path_list:
         p_abs = (BASE_DIR / p)
         if p_abs.exists():
-            return pd.read_csv(p_abs)
+            return pd.read_csv(p_abs,low_memory=True)
     return None
 
 # ============ Data loading (Render-safe) ============
