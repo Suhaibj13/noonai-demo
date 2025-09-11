@@ -154,25 +154,86 @@ def _read_first(path_list):
     return None
 
 # ============ Data loading (Render-safe) ============
+def read_csv_safe(path: Path, name: str):
+    """
+    Try multiple encodings and parsers so we don't 500 on slightly messy CSVs.
+    Returns (df, meta) or raises RuntimeError with a concise trail.
+    """
+    attempts = [
+        dict(encoding="utf-8-sig", engine="c", low_memory=False),
+        dict(encoding="utf-8",     engine="c", low_memory=False),
+        dict(encoding="latin-1",   engine="c", low_memory=False),
+        # very forgiving fallback (slower): skips bad rows rather than dying
+        dict(encoding="utf-8",     engine="python", on_bad_lines="skip", low_memory=False),
+        dict(encoding="latin-1",   engine="python", on_bad_lines="skip", low_memory=False),
+    ]
+    errors = []
+    for kw in attempts:
+        try:
+            df = pd.read_csv(path, **kw)
+            meta = {
+                "name": name,
+                "path": str(path),
+                "encoding": kw.get("encoding"),
+                "engine": kw.get("engine"),
+                "on_bad_lines": kw.get("on_bad_lines", "error"),
+                "rows": int(df.shape[0]),
+                "cols": int(df.shape[1]),
+            }
+            return df, meta
+        except Exception as e:
+            errors.append(f"{kw.get('encoding')}/{kw.get('engine')}/{kw.get('on_bad_lines','error')}: {type(e).__name__}: {e}")
+    raise RuntimeError(f"Failed to read {name} at {path}. Tried -> " + " | ".join(errors))
+
+
+def read_first_safe(candidates, name: str):
+    """
+    First existing path from candidates, read it via read_csv_safe.
+    Returns (df, meta) or (None, {'name':..., 'missing': True, 'tried': [...]})
+    """
+    tried = []
+    for fname in candidates:
+        p = (BASE_DIR / fname)
+        if p.exists():
+            df, meta = read_csv_safe(p, name)
+            meta["resolved"] = fname
+            return df, meta
+        tried.append(str(p))
+    return None, {"name": name, "missing": True, "tried": tried}
+
 def load_data():
-    inv = pd.read_csv(BASE_DIR / "inventory.csv")
-    ords = pd.read_csv(BASE_DIR / "orders.csv")
-    mg_raw = _read_first(["minimum_guarantee.csv", "Minimum_Guarantee.csv", "mg.csv"])
+    # inventory.csv
+    inv_df, inv_meta = read_csv_safe(BASE_DIR / "inventory.csv", "inventory.csv")
+    # orders.csv
+    ord_df, ord_meta = read_csv_safe(BASE_DIR / "orders.csv", "orders.csv")
+    # minimum_guarantee.csv (or tolerated alternatives)
+    mg_df, mg_meta = read_first_safe(
+        ["minimum_guarantee.csv", "Minimum_Guarantee.csv", "mg.csv"],
+        "minimum_guarantee.csv"
+    )
 
-    inv.columns  = [c.strip().lower() for c in inv.columns]
-    ords.columns = [c.strip().lower() for c in ords.columns]
-    if mg_raw is not None:
-        mg_raw.columns = [c.strip().lower().replace(" ", "_") for c in mg_raw.columns]
+    # Normalize/alias
+    inv_df.columns = [c.strip().lower() for c in inv_df.columns]
+    ord_df.columns = [c.strip().lower() for c in ord_df.columns]
+    if mg_df is not None:
+        mg_df.columns = [c.strip().lower().replace(" ", "_") for c in mg_df.columns]
 
-    inv  = _apply_aliases(inv,  SCHEMA_CONFIG["inventory"]["aliases"])
-    ords = _apply_aliases(ords, SCHEMA_CONFIG["orders"]["aliases"])
-    if mg_raw is not None:
-        mg_raw = _apply_aliases(mg_raw, SCHEMA_CONFIG["mg"]["aliases"])
+    inv_df  = _apply_aliases(inv_df,  SCHEMA_CONFIG["inventory"]["aliases"])
+    ord_df  = _apply_aliases(ord_df,  SCHEMA_CONFIG["orders"]["aliases"])
+    if mg_df is not None:
+        mg_df = _apply_aliases(mg_df, SCHEMA_CONFIG["mg"]["aliases"])
 
-    inv = _enforce_schema(inv, "inventory")
-    ords = _enforce_schema(ords, "orders")
-    mg  = _enforce_schema(mg_raw, "mg") if mg_raw is not None else pd.DataFrame(columns=SCHEMA_CONFIG["mg"]["columns"])
-    return inv, ords, mg
+    # Enforce schemas (never crash)
+    inv = _enforce_schema(inv_df, "inventory")
+    ords = _enforce_schema(ord_df, "orders")
+    mg  = _enforce_schema(mg_df, "mg") if mg_df is not None else pd.DataFrame(columns=SCHEMA_CONFIG["mg"]["columns"])
+
+    # Helpful logs once at startup/use
+    logging.info("CSV OK • inventory=%s rows • orders=%s rows • mg=%s rows",
+                 inv.shape[0], ords.shape[0], (mg.shape[0] if mg is not None else 0))
+
+    # Return dataframes + lightweight meta so /healthz can show what happened
+    return inv, ords, mg, {"inventory": inv_meta, "orders": ord_meta, "mg": mg_meta}
 
 # ============ SQL helpers & rules ============
 def normalize_time_literals(sql: str) -> str:
@@ -515,17 +576,22 @@ def diagz():
 @app.get("/healthz")
 def healthz():
     try:
-        inv, ords, mg = load_data()
+        inv, ords, mg, meta = load_data()  # uses the robust reader above
         shapes = {
             "inventory": list(inv.shape) if isinstance(inv, pd.DataFrame) else None,
-            "orders": list(ords.shape) if isinstance(ords, pd.DataFrame) else None,
-            "mg": list(mg.shape) if isinstance(mg, pd.DataFrame) else None
+            "orders":    list(ords.shape) if isinstance(ords, pd.DataFrame) else None,
+            "mg":        list(mg.shape)  if isinstance(mg,  pd.DataFrame) else None,
         }
-        ok = all(shapes.get(k) for k in ("orders","inventory","mg"))
-        return safe_json({"ok": ok, "shapes": shapes}, 200 if ok else 500)
+        ok = all(shapes.get(k) for k in ("orders", "inventory"))  # mg can be legitimately missing
+        return safe_json({
+            "ok": ok,
+            "shapes": shapes,
+            "meta": meta
+        }, 200 if ok else 500)
     except Exception as e:
-        logging.exception("healthz failed")
-        return safe_json({"ok": False, "error": str(e)}, 500)
+        logging.exception("/healthz failed")
+        # Return a terse but informative JSON error (no HTML)
+        return safe_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
 
 @app.post("/run_step")
 def run_step():
