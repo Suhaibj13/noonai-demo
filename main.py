@@ -6,6 +6,8 @@ from pathlib import Path
 from datetime import timedelta
 import pandas as pd
 import numpy as np
+# APPEND (imports)
+from analysis_engine import run_analysis_router
 
 # Make dtype coercion optional to reduce memory pressure in prod
 COERCE_DTYPES = bool(int(os.getenv("COERCE_DTYPES", "0")))  # 0 = off (light mode), 1 = on
