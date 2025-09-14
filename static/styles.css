@@ -238,13 +238,3 @@ button#send[disabled]{ opacity:.6; cursor:not-allowed }
 .table-scroll{overflow:auto;max-width:100%}
 table.mini{border-collapse:collapse;font-size:12px}
 table.mini th,table.mini td{border:1px solid rgba(0,0,0,.06);padding:6px 8px;white-space:nowrap}
-
-/* --- EMERGENCY CLICK-THROUGH FIX (append at end) --- */
-.overlay, .glass, .blur, .bg-blur, .bg-overlay, .veil, .backdrop, .modal-backdrop {
-  pointer-events: none !important;
-}
-header, .sidebar, .content, .composer, .controls, button, input, textarea, select, a {
-  pointer-events: auto !important;
-  position: relative;
-  z-index: 10;
-}
