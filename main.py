@@ -8,8 +8,11 @@ from datetime import timedelta
 import pandas as pd
 import numpy as np
 
+load_dotenv()
+
 # Make dtype coercion optional to reduce memory pressure in prod
 COERCE_DTYPES = bool(int(os.getenv("COERCE_DTYPES", "0")))  # 0 = off (light mode), 1 = on
+
 # ============ Optional LLM client (only used if key is set) ============
 try:
     from groq import Groq
@@ -23,7 +26,6 @@ def get_groq_client():
     return None
 
 # ============ Flask setup ============
-load_dotenv()
 app = Flask(__name__, static_folder="static", template_folder="templates")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 BASE_DIR = Path(__file__).resolve().parent  # /opt/render/project/src on Render
@@ -551,6 +553,168 @@ def run_data_flow(user_query: str, *, analysis_style: bool = False):
     reply_text = f"{preview}\n\n(Showing first {preview_rows} of {len(df)} rows)" if len(df) > 50 else preview
     return {"reply": reply_text, "sql": sql, "preview": preview}
 
+# === Analysis chat (narrative, no table dumps) ==========================
+def _fmt_num(x):
+    import math
+    try:
+        if x is None: return "-"
+        if isinstance(x, float) and (math.isnan(x) or math.isinf(x)): return "-"
+        if isinstance(x, int): return f"{x:,}"
+        if isinstance(x, float): return f"{x:,.2f}"
+        # try numeric cast
+        xv = float(x)
+        return f"{xv:,.2f}"
+    except Exception:
+        return str(x)
+
+def _pct(a, b):
+    try:
+        if b in (0, None): return None
+        return (a / b) * 100.0
+    except Exception:
+        return None
+
+def _bulletize(lines):
+    lines = [str(s) for s in lines if s is not None and str(s).strip()]
+    return "Insights:\n" + "\n".join(f"- {s}" for s in lines) if lines else "No obvious insights found."
+
+def _orders_insights(ords: pd.DataFrame):
+    lines = []
+    if not isinstance(ords, pd.DataFrame) or ords.empty:
+        return ["No orders found."]
+
+    total_orders = int(ords.shape[0])
+    lines.append(f"Total orders: {_fmt_num(total_orders)}")
+
+    if "user_id" in ords:
+        uniq = int(ords["user_id"].dropna().nunique())
+        lines.append(f"Unique customers: {_fmt_num(uniq)}")
+
+    if "sale_price" in ords:
+        aov = float(ords["sale_price"].mean())
+        lines.append(f"AOV (mean sale_price): {_fmt_num(aov)}")
+
+    # simple weekly trend if created_at exists
+    if "created_at" in ords:
+        d = ords[["created_at"]].copy()
+        d["created_at"] = pd.to_datetime(d["created_at"], errors="coerce")
+        d = d.dropna()
+        if not d.empty:
+            w = d.set_index("created_at").resample("W").size()
+            if len(w) >= 2 and w.iloc[-2] != 0:
+                delta = ((w.iloc[-1] - w.iloc[-2]) / w.iloc[-2]) * 100
+                lines.append(f"Weekly order volume change (last vs prev): {delta:+.1f}%")
+
+    # status mix if present
+    if "status" in ords:
+        vc = ords["status"].astype(str).value_counts().head(3)
+        if not vc.empty:
+            mix = ", ".join(f"{k}: {_fmt_num(int(v))}" for k, v in vc.items())
+            lines.append(f"Top statuses: {mix}")
+
+    return lines
+
+def _mg_insights(mg: pd.DataFrame):
+    lines = []
+    if not isinstance(mg, pd.DataFrame) or mg.empty:
+        return ["MG dataset appears empty."]
+
+    # core KPIs
+    if "id_user" in mg:
+        total_da = int(mg["id_user"].dropna().nunique())
+        lines.append(f"Total DAs (unique id_user): {_fmt_num(total_da)}")
+
+    if "mg_eligible" in mg:
+        elig_rate = float(pd.to_numeric(mg["mg_eligible"], errors="coerce").mean()) * 100.0
+        lines.append(f"MG eligibility rate: {elig_rate:.1f}%")
+
+    if "total_payout" in mg:
+        total_payout = float(pd.to_numeric(mg["total_payout"], errors="coerce").sum())
+        lines.append(f"Total payout: {_fmt_num(total_payout)}")
+
+    if "rate" in mg:
+        avg_rate = float(pd.to_numeric(mg["rate"], errors="coerce").mean())
+        lines.append(f"Average rate: {_fmt_num(avg_rate)}")
+
+    # breakdowns
+    if {"city", "total_payout"}.issubset(mg.columns):
+        by_city = (pd.to_numeric(mg["total_payout"], errors="coerce")
+                   .groupby(mg["city"]).sum().sort_values(ascending=False).head(3))
+        if not by_city.empty:
+            s = ", ".join(f"{idx}: {_fmt_num(val)}" for idx, val in by_city.items())
+            lines.append(f"Top cities by payout: {s}")
+
+    if {"vendor_name", "total_payout"}.issubset(mg.columns):
+        by_vendor = (pd.to_numeric(mg["total_payout"], errors="coerce")
+                     .groupby(mg["vendor_name"]).sum().sort_values(ascending=False).head(3))
+        if not by_vendor.empty:
+            s = ", ".join(f"{idx}: {_fmt_num(val)}" for idx, val in by_vendor.items())
+            lines.append(f"Top vendors by payout: {s}")
+
+    # red flags: high penalties, low attendance vs PA
+    if "fnd_ndr_penalty_amount" in mg:
+        top_pen = (pd.to_numeric(mg["fnd_ndr_penalty_amount"], errors="coerce")
+                   .fillna(0).sort_values(ascending=False).head(3))
+        if top_pen.notna().any() and top_pen.sum() > 0:
+            lines.append(f"Highest FND/NDR penalties (top 3 sum): {_fmt_num(float(top_pen.sum()))}")
+
+    if {"attendance", "perfect_attendance"}.issubset(mg.columns):
+        mis = mg[(pd.to_numeric(mg["attendance"], errors="coerce") <
+                  pd.to_numeric(mg["perfect_attendance"], errors="coerce") - 3)]
+        if isinstance(mis, pd.DataFrame) and not mis.empty:
+            lines.append(f"Attendance shortfalls (>3 days under PA): {_fmt_num(int(mis.shape[0]))}")
+
+    return lines
+
+def _inventory_insights(inv: pd.DataFrame, ords: pd.DataFrame):
+    lines = []
+    if not isinstance(inv, pd.DataFrame) or inv.empty:
+        return ["Inventory dataset appears empty."]
+
+    total_items = int(inv.shape[0])
+    lines.append(f"Inventory rows: {_fmt_num(total_items)}")
+
+    if "product_id" in inv:
+        sku_count = int(inv["product_id"].dropna().nunique())
+        lines.append(f"Distinct SKUs: {_fmt_num(sku_count)}")
+
+    # on-hand as 'sold_at is NULL'
+    if "sold_at" in inv:
+        on_hand = int(inv["sold_at"].isna().sum())
+        lines.append(f"Current on-hand (sold_at NULL): {_fmt_num(on_hand)}")
+
+    # simple velocity by joining to orders if possible
+    if {"product_id"}.issubset(inv.columns) and {"product_id", "created_at"}.issubset(ords.columns):
+        o = ords[["product_id", "created_at"]].dropna().copy()
+        o["created_at"] = pd.to_datetime(o["created_at"], errors="coerce")
+        o = o.dropna()
+        if not o.empty:
+            last30 = o[o["created_at"] >= (o["created_at"].max() - pd.Timedelta(days=30))]
+            vel = (last30.groupby("product_id").size().rename("d30_sold"))
+            if not vel.empty:
+                lines.append(f"Products sold in the last 30 days: {_fmt_num(int((vel>0).sum()))}")
+    return lines
+
+def run_analysis_chat_flow(user_query: str) -> dict:
+    """Return a plain-text narrative in 'reply' (no table dumps)."""
+    inv, ords, mg = load_data_for_routes()
+    ql = (user_query or "").lower()
+
+    if any(k in ql for k in ("mg", "minimum guarantee", "minimum_guarantee")):
+        bullets = _mg_insights(mg)
+        text = _bulletize(bullets)
+        return {"reply": text, "sql": None, "preview": None}
+
+    if any(k in ql for k in ("inventory", "stock", "stockout", "stock out", "reorder")):
+        bullets = _inventory_insights(inv, ords)
+        text = _bulletize(bullets)
+        return {"reply": text, "sql": None, "preview": None}
+
+    # default: orders
+    bullets = _orders_insights(ords)
+    text = _bulletize(bullets)
+    return {"reply": text, "sql": None, "preview": None}
+    
 # ============ Info (web) ============
 INFO_SYSTEM_PROMPT = """
 You are SAGE-Info, an information expert.
@@ -648,8 +812,8 @@ def ask():
         if mode == "data":
             res = run_data_flow(user_query, analysis_style=False)
         elif mode == "analysis":
-            # reuse same dataset generation but you can add narrative later
-            res = run_data_flow(user_query, analysis_style=True)
+            # NEW: narrative insights instead of table dumps
+            res = run_analysis_chat_flow(user_query)
         elif mode == "web":
             return safe_json({"ok": True, "reply": fetch_online_answer(user_query), "sql": None, "preview": None, "mode": "web"})
         else:
