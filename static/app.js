@@ -1,57 +1,51 @@
-/* static/app.js
-   Noon AI – chat UI with Analysis mode
-   - Sends { q, mode, datasets, fileHints } to /ask
-   - Renders "insights" (KPIs + bullets + optional tables)
-   - Falls back to your existing table/text rendering for non-insights
+/* static/app.js — Noon AI resilient UI
+   - Defensive selectors, event delegation (no fragile IDs)
+   - Works with "web" | "data" | "analysis" modes
+   - Renders "insights" (KPIs/bullets/tables) when backend returns { type:"insights", ... }
 */
 
-/* ---------- Configurable selectors (adjust if your HTML IDs differ) ---------- */
-const EL = {
-  messages: document.getElementById("messages"),
-  input: document.getElementById("userInput"),
-  send: document.getElementById("sendBtn"),
-  chipWeb: document.getElementById("chip-web"),
-  chipData: document.getElementById("chip-data"),
-  chipAnalysis: document.getElementById("chip-analysis"),
-  datasetPicker: document.getElementById("dataset-picker") // optional <select multiple>
-};
+/* =============== Helpers =============== */
+function onceReady(fn) {
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fn);
+  else fn();
+}
 
-/* ---------- Mode / dataset state ---------- */
-let currentMode = "web";          // "web" | "data" | "analysis"
-let currentDatasets = [];         // e.g. ["orders"] or ["orders","inventory"]
-let fileHints = [];               // optional explicit filenames/paths
-
-/* ---------- Utilities ---------- */
+function $(sel, root = document) { return root.querySelector(sel); }
+function $all(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
 function elSafe(str) {
   if (str === null || str === undefined) return "";
-  return String(str)
-    .replaceAll("&","&amp;")
-    .replaceAll("<","&lt;")
-    .replaceAll(">","&gt;");
+  return String(str).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 }
 
-function addMsg(role, html) {
-  const wrapper = document.createElement("div");
-  wrapper.className = `msg ${role}`;
-  wrapper.innerHTML = html;
-  EL.messages.appendChild(wrapper);
-  EL.messages.scrollTop = EL.messages.scrollHeight;
+// Try multiple selectors; return the first that exists
+function pick(...selectors) {
+  for (const s of selectors) {
+    const el = $(s);
+    if (el) return el;
+  }
+  return null;
 }
 
-function addTyping() {
-  const id = `typing-${Date.now()}`;
-  addMsg("assistant", `<span id="${id}" class="typing">...</span>`);
-  return id;
-}
-function removeTyping(id) {
-  const t = document.getElementById(id);
-  if (t && t.parentNode) t.parentNode.remove();
+/* =============== Global state =============== */
+let currentMode = "web";           // "web" | "data" | "analysis"
+let currentDatasets = [];          // e.g. ["orders"], ["orders","inventory"]
+let fileHints = [];                // optional: filenames/paths
+
+function getMessagesEl() {
+  return pick("#messages", ".messages", "#chat-messages", "[data-messages]");
 }
 
-/* ---------- Insights renderer (safe APPEND) ---------- */
+function getInputEl() {
+  return pick("#userInput", "#input", "#composer-input", 'textarea[name="message"]', "textarea", 'input[type="text"]');
+}
+
+/* =============== Rendering =============== */
 function tryRenderInsights(resp) {
   try {
     if (!resp || resp.type !== "insights") return false;
+
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
 
     const kpis = resp.kpis || {};
     const insights = resp.insights || [];
@@ -63,13 +57,13 @@ function tryRenderInsights(resp) {
       ([k,v]) => `
         <div class="kpi">
           <div class="kpi-key">${elSafe(k.replaceAll('_',' '))}</div>
-          <div class="kpi-val">${(v ?? '-')}</div>
+          <div class="kpi-val">${(v ?? '-') }</div>
         </div>`
     ).join("");
 
     const li = (arr) =>
       (arr && arr.length)
-        ? `<ul class="insight-bullets">${arr.map(x=>`<li>${elSafe(x)}</li>`).join("")}</ul>`
+        ? `<ul class="insight-bullets">${arr.map(x => `<li>${elSafe(x)}</li>`).join("")}</ul>`
         : "";
 
     const byList = (title, list) =>
@@ -77,7 +71,7 @@ function tryRenderInsights(resp) {
         ? `<div class="insight-subtitle">${elSafe(title)}</div>${li(list.map(x => {
             if (typeof x === "string") return x;
             if (x && typeof x === "object" && "key" in x)
-              return `${x.key} — ${(x.payout||0).toLocaleString()}`;
+              return `${x.key} — ${(x.payout || 0).toLocaleString()}`;
             return JSON.stringify(x);
           }))}`
         : "";
@@ -100,14 +94,18 @@ function tryRenderInsights(resp) {
         })()
       : "";
 
-    addMsg("assistant", `
+    wrap.innerHTML = `
       <div class="insight-kpis">${kpiHtml}</div>
       ${li(insights)}
       ${redFlags?.length ? `<div class="insight-subtitle">Red flags</div>${li(redFlags)}` : ""}
       ${byList("By city", breakdowns.by_city)}
       ${byList("By vendor", breakdowns.by_vendor)}
       ${tableTopRisk}
-    `);
+    `;
+
+    const msgEl = getMessagesEl() || document.body;
+    msgEl.appendChild(wrap);
+    msgEl.scrollTop = msgEl.scrollHeight;
 
     return true;
   } catch (e) {
@@ -116,60 +114,84 @@ function tryRenderInsights(resp) {
   }
 }
 
-/* ---------- Generic table/text renderer (kept for web/data) ---------- */
 function renderTableOrText(resp) {
-  // If backend returns html, string, array-of-obj, or obj-of-obj — handle broadly
-  if (!resp) { addMsg("assistant", "<em>No response</em>"); return; }
+  const msgEl = getMessagesEl() || document.body;
+  const wrap = document.createElement("div");
+  wrap.className = "msg assistant";
 
-  // String → show as text
-  if (typeof resp === "string") { addMsg("assistant", `<p>${elSafe(resp)}</p>`); return; }
+  if (!resp) { wrap.innerHTML = "<em>No response</em>"; msgEl.appendChild(wrap); return; }
 
-  // If it looks like a plain table: [{...}, {...}]
+  if (typeof resp === "string") {
+    wrap.innerHTML = `<p>${elSafe(resp)}</p>`;
+    msgEl.appendChild(wrap); return;
+  }
+
   if (Array.isArray(resp) && resp.length && typeof resp[0] === "object" && !Array.isArray(resp[0])) {
     const cols = Object.keys(resp[0]);
     const thead = `<thead><tr>${cols.map(c=>`<th>${elSafe(c)}</th>`).join("")}</tr></thead>`;
     const tbody = `<tbody>${resp.map(row => `<tr>${cols.map(c => `<td>${elSafe(row[c])}</td>`).join("")}</tr>`).join("")}</tbody>`;
-    addMsg("assistant", `<div class="table-scroll"><table class="mini">${thead}${tbody}</table></div>`);
-    return;
+    wrap.innerHTML = `<div class="table-scroll"><table class="mini">${thead}${tbody}</table></div>`;
+    msgEl.appendChild(wrap); msgEl.scrollTop = msgEl.scrollHeight; return;
   }
 
-  // If it's an object with a "data" key or anything else → pretty JSON
-  addMsg("assistant", `<pre class="json">${elSafe(JSON.stringify(resp, null, 2))}</pre>`);
+  wrap.innerHTML = `<pre class="json">${elSafe(JSON.stringify(resp, null, 2))}</pre>`;
+  msgEl.appendChild(wrap); msgEl.scrollTop = msgEl.scrollHeight;
 }
 
-/* ---------- Send flow ---------- */
+function addMsg(role, html) {
+  const msgEl = getMessagesEl() || document.body;
+  const wrap = document.createElement("div");
+  wrap.className = `msg ${role}`;
+  wrap.innerHTML = html;
+  msgEl.appendChild(wrap);
+  msgEl.scrollTop = msgEl.scrollHeight;
+}
+
+function addTyping() {
+  const id = `typing-${Date.now()}`;
+  addMsg("assistant", `<span id="${id}" class="typing">...</span>`);
+  return id;
+}
+function removeTyping(id) {
+  const t = document.getElementById(id);
+  if (t && t.parentNode) t.parentNode.remove();
+}
+
+/* =============== Send flow =============== */
 async function sendQuery(userText) {
-  if (!userText || !userText.trim()) return;
-  addMsg("user", `<p>${elSafe(userText)}</p>`);
+  const inputEl = getInputEl();
+  const text = (userText ?? (inputEl ? inputEl.value : "")).trim();
+  if (!text) return;
+
+  addMsg("user", `<p>${elSafe(text)}</p>`);
+  if (inputEl) inputEl.value = "";
   const typingId = addTyping();
 
-  // Gather datasets from optional <select multiple> if present
-  if (EL.datasetPicker) {
-    const opts = Array.from(EL.datasetPicker.selectedOptions).map(o => o.value);
+  // dataset-picker (optional <select multiple>) → datasets
+  const picker = pick("#dataset-picker", "[data-datasets]");
+  if (picker && picker.selectedOptions) {
+    const opts = Array.from(picker.selectedOptions).map(o => o.value);
     if (opts.length) currentDatasets = opts;
   }
 
   const payload = {
-    q: userText.trim(),
-    mode: currentMode,              // "web" | "data" | "analysis"
-    datasets: currentDatasets,      // [] is fine — backend auto-detects
-    fileHints                         // leave [] unless you want to force files
+    q: text,
+    mode: currentMode,
+    datasets: currentDatasets,
+    fileHints
   };
 
   try {
     const res = await fetch("/ask", {
       method: "POST",
-      headers: { "Content-Type": "application/json","Accept": "application/json" },
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify(payload)
     });
-
     const resp = await res.json();
     removeTyping(typingId);
 
-    // Analysis insights first; if not, fall back to table/text
     if (tryRenderInsights(resp)) return;
     renderTableOrText(resp);
-
   } catch (err) {
     console.error(err);
     removeTyping(typingId);
@@ -177,42 +199,116 @@ async function sendQuery(userText) {
   }
 }
 
-/* ---------- Wire UI ---------- */
-function init() {
-  // Send button / Enter key
-  EL.send?.addEventListener("click", () => {
-    const t = EL.input.value;
-    EL.input.value = "";
-    sendQuery(t);
-  });
-  EL.input?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      const t = EL.input.value;
-      EL.input.value = "";
-      sendQuery(t);
-    }
-  });
+/* =============== Event delegation (buttons, chips, presets) =============== */
+function setModeFromEl(el) {
+  // priority: data-mode attribute, then ID/class mapping
+  const dm = el.getAttribute?.("data-mode");
+  if (dm) return dm.toLowerCase();
 
-  // Mode chips (safe APPEND)
-  EL.chipWeb?.addEventListener("click", () => { currentMode = "web";  uiActive("web"); });
-  EL.chipData?.addEventListener("click", () => { currentMode = "data"; uiActive("data"); });
-  EL.chipAnalysis?.addEventListener("click", () => { currentMode = "analysis"; uiActive("analysis"); });
+  const id = (el.id || "").toLowerCase();
+  if (id.includes("analysis")) return "analysis";
+  if (id.includes("data")) return "data";
+  if (id.includes("web")) return "web";
 
-  // (Optional) set default dataset from picker on load
-  if (EL.datasetPicker) {
-    const opts = Array.from(EL.datasetPicker.selectedOptions).map(o => o.value);
-    currentDatasets = opts;
+  const cls = (el.className || "").toLowerCase();
+  if (cls.includes("analysis")) return "analysis";
+  if (cls.includes("data")) return "data";
+  if (cls.includes("web")) return "web";
+
+  return currentMode; // unchanged if unknown
+}
+
+function uiActive(which) {
+  const candidates = [
+    "#chip-web", "#chip-data", "#chip-analysis",
+    "[data-mode='web']", "[data-mode='data']", "[data-mode='analysis']",
+    ".chip-web", ".chip-data", ".chip-analysis"
+  ];
+  $all(candidates.join(",")).forEach(btn => btn.classList?.remove?.("active"));
+
+  const targetSel = (which === "web") ? ["#chip-web", "[data-mode='web']", ".chip-web"]
+                   : (which === "data") ? ["#chip-data", "[data-mode='data']", ".chip-data"]
+                   : ["#chip-analysis", "[data-mode='analysis']", ".chip-analysis"];
+
+  for (const s of targetSel) {
+    const el = $(s);
+    if (el) { el.classList?.add?.("active"); break; }
   }
 }
 
-// simple visual active state helper (no-op if you don’t have these classes)
-function uiActive(which) {
-  [EL.chipWeb, EL.chipData, EL.chipAnalysis].forEach(btn => btn?.classList.remove("active"));
-  if (which === "web") EL.chipWeb?.classList.add("active");
-  if (which === "data") EL.chipData?.classList.add("active");
-  if (which === "analysis") EL.chipAnalysis?.classList.add("active");
+function onClick(e) {
+  const t = e.target;
+
+  // Send
+  const sendBtn = t.closest?.('#sendBtn, #send, #send-button, .send, [data-action="send"]');
+  if (sendBtn) { e.preventDefault(); sendQuery(); return; }
+
+  // Reset (clear messages)
+  const resetBtn = t.closest?.('#resetBtn, #reset, .reset, [data-action="reset"]');
+  if (resetBtn) {
+    e.preventDefault();
+    const msgEl = getMessagesEl();
+    if (msgEl) msgEl.innerHTML = "";
+    return;
+  }
+
+  // Modes
+  const modeBtn = t.closest?.('[data-mode], #chip-web, #chip-data, #chip-analysis, .chip-web, .chip-data, .chip-analysis');
+  if (modeBtn) {
+    e.preventDefault();
+    currentMode = setModeFromEl(modeBtn);
+    uiActive(currentMode);
+    return;
+  }
+
+  // Presets / Quick chips → send their query
+  const preset = t.closest?.('[data-q], [data-preset], .preset, .quick-chip');
+  if (preset) {
+    e.preventDefault();
+    const q = preset.getAttribute("data-q") || preset.getAttribute("data-preset") || preset.textContent.trim();
+    if (q) sendQuery(q);
+    return;
+  }
+
+  // Audit steps (same as presets; support data-step/data-q)
+  const step = t.closest?.('[data-step], .audit-step');
+  if (step) {
+    e.preventDefault();
+    const q = step.getAttribute("data-q") || step.getAttribute("data-step") || step.textContent.trim();
+    if (q) sendQuery(q);
+    return;
+  }
 }
 
-/* ---------- Kick off ---------- */
-init();
+function onKeydown(e) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    const inputEl = getInputEl();
+    if (inputEl && document.activeElement === inputEl) {
+      e.preventDefault();
+      sendQuery();
+    }
+  }
+}
+
+/* =============== Boot =============== */
+onceReady(() => {
+  // Attach one-time delegated listeners
+  document.addEventListener("click", onClick);
+  document.addEventListener("keydown", onKeydown);
+
+  // If there’s a default selected mode element, pick it; else default "web"
+  const active = $('[data-mode].active, .chip-web.active, .chip-data.active, .chip-analysis.active');
+  if (active) currentMode = setModeFromEl(active);
+
+  // (Optional) initialize datasets from a multi-select
+  const picker = pick("#dataset-picker", "[data-datasets]");
+  if (picker && picker.selectedOptions) {
+    currentDatasets = Array.from(picker.selectedOptions).map(o => o.value);
+  }
+
+  // Simple sanity log to spot ID mismatches quickly
+  console.log("[Noon AI] UI wired. mode=%s datasets=%o", currentMode, currentDatasets);
+});
+
+/* =============== Minimal CSS helpers (safe) =============== */
+/* Keep these in CSS file ideally; left here in case. */
