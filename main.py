@@ -1,11 +1,7 @@
-# main.py — Noon AI (restored architecture: Groq for Web/Data/Analysis)
+# main.py — Noon AI (Groq for Web/Data/Analysis) with SQL column guard & follow-up context
 from __future__ import annotations
 
-import os
-import re
-import json
-import textwrap
-import logging
+import os, re, json, logging, textwrap
 from typing import Dict, List, Optional, Tuple
 
 import duckdb
@@ -23,67 +19,55 @@ logging.basicConfig(level=logging.INFO)
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-# Memory for reuse in Analysis follow-ups
+# previous result cache for follow-ups
 last_result_df: Optional[pd.DataFrame] = None
 last_result_sql: Optional[str] = None
 last_result_query: Optional[str] = None
-REUSE_PHRASES = ["same as above", "use above", "previous result", "same dataset", "same data"]
+
+# detect follow-ups that refer to the previous dataset
+REUSE_PHRASES = [
+    "same as above","use above","previous result","same dataset","same data",
+    "these","those","them","out of these","from these","of these","above dataset","previous"
+]
 
 # -----------------------------------------------------------------------------
-# Groq client (lazy)
+# Groq client
 # -----------------------------------------------------------------------------
 def llm_chat(messages: List[Dict], temperature: float = 0.0) -> str:
-    """
-    Minimal Groq chat wrapper. If GROQ_API_KEY is missing, raise.
-    """
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not set.")
-    # Lazy import to avoid hard dependency if not used
     from groq import Groq
     client = Groq(api_key=GROQ_API_KEY)
     resp = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        temperature=temperature,
+        model=GROQ_MODEL, messages=messages, temperature=temperature
     )
     return resp.choices[0].message.content.strip()
 
 # -----------------------------------------------------------------------------
-# Utilities
+# Utils
 # -----------------------------------------------------------------------------
-def safe_json(obj, status=200):
-    return jsonify(obj), status
+def safe_json(obj, status=200): return jsonify(obj), status
 
 def trim_text(s: str, max_chars: int = 2000) -> str:
     s = s or ""
     return s if len(s) <= max_chars else s[:max_chars] + "\n..."
 
 def extract_sql(text: str) -> str:
-    """
-    Extract SQL from a response that may contain ```sql blocks``` or plain SQL.
-    """
-    if not text:
-        return ""
-    m = re.search(r"```sql(.*?)```", text, flags=re.S | re.I)
-    if m:
-        return m.group(1).strip().strip(";")
-    m2 = re.search(r"```(.*?)```", text, flags=re.S | re.I)
-    if m2:
-        return m2.group(1).strip().strip(";")
+    if not text: return ""
+    m = re.search(r"```sql(.*?)```", text, flags=re.S|re.I)
+    if m: return m.group(1).strip().strip(";")
+    m = re.search(r"```(.*?)```", text, flags=re.S|re.I)
+    if m: return m.group(1).strip().strip(";")
     return text.strip().strip(";")
 
 def df_preview_string(df: pd.DataFrame, rows: int = 50) -> str:
-    try:
-        return df.head(rows).to_string(index=False)
-    except Exception:
-        # fallback
-        return str(df.head(rows))
+    try:    return df.head(rows).to_string(index=False)
+    except: return str(df.head(rows))
 
 def df_as_csv_snippet(df: pd.DataFrame, max_rows=300, max_chars=18000) -> str:
-    if df is None or df.empty:
-        return ""
+    if df is None or df.empty: return ""
     try:
         csv = df.head(max_rows).to_csv(index=False)
         return csv if len(csv) <= max_chars else (csv[:max_chars] + "\n...")
@@ -91,48 +75,36 @@ def df_as_csv_snippet(df: pd.DataFrame, max_rows=300, max_chars=18000) -> str:
         return df.head(50).to_string(index=False)
 
 def pre_analyze(df: pd.DataFrame) -> Dict:
-    if df is None or df.empty:
-        return {"rows": 0, "cols": 0}
+    if df is None or df.empty: return {"rows":0, "cols":0}
     numeric = df.select_dtypes(include="number").columns.tolist()
-    summary = {
-        "rows": int(df.shape[0]),
-        "cols": int(df.shape[1]),
-        "numeric_cols": numeric[:10],
-    }
-    return summary
+    return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "numeric_cols": numeric[:10]}
 
 # -----------------------------------------------------------------------------
-# Data loading (CSV)
+# Data loading
 # -----------------------------------------------------------------------------
 def read_csv_if_exists(path: str) -> pd.DataFrame:
     if os.path.exists(path):
-        try:
-            return pd.read_csv(path)
+        try:    return pd.read_csv(path)
         except Exception as e:
             logging.warning("Failed to read %s: %s", path, e)
             return pd.DataFrame()
     return pd.DataFrame()
 
 def load_data_for_routes() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Returns (inventory_df, orders_df, mg_df)
-    Looks for standard filenames at repo root.
-    """
     inv = read_csv_if_exists("inventory.csv")
     ords = read_csv_if_exists("orders.csv")
-    mg = read_csv_if_exists("minimum_guarantee.csv")
-    # Normalize likely date columns (best effort, non-fatal)
+    mg  = read_csv_if_exists("minimum_guarantee.csv")
+    # soft date coercion (best-effort)
     for df in (inv, ords, mg):
         for col in df.columns:
-            if "date" in col.lower() or "created_at" in col.lower() or "sold_at" in col.lower():
-                try:
-                    df[col] = pd.to_datetime(df[col], errors="ignore")
-                except Exception:
-                    pass
+            cl = col.lower()
+            if "date" in cl or "created_at" in cl or "sold_at" in cl:
+                try: df[col] = pd.to_datetime(df[col], errors="ignore")
+                except: pass
     return inv, ords, mg
 
 # -----------------------------------------------------------------------------
-# DuckDB execution
+# DuckDB
 # -----------------------------------------------------------------------------
 def build_memory_db(inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFrame):
     con = duckdb.connect(database=":memory:")
@@ -146,57 +118,85 @@ def execute_sql(sql: str, inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFram
     return con.execute(sql).fetch_df()
 
 # -----------------------------------------------------------------------------
-# Schema/Prompt builders
+# Schema & prompts
 # -----------------------------------------------------------------------------
 def build_schema_description(inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFrame) -> str:
     def one(df, name):
         cols = [f"- {c}: {str(df[c].dtype)}" for c in df.columns]
         return f"Table {name} columns:\n" + ("\n".join(cols) if cols else "(empty)")
-    return "\n\n".join([one(inv, "inventory"), one(ords, "orders"), one(mg, "mg")])
+    return "\n\n".join([one(inv,"inventory"), one(ords,"orders"), one(mg,"mg")])
 
-def sql_generation_prompt(question: str, schema_desc: str, analysis_style: bool) -> List[Dict]:
+def sql_generation_prompt(question: str, schema_desc: str, analysis_style: bool,
+                          previous_sql: Optional[str] = None) -> List[Dict]:
     sys = (
         "You are a senior data analyst. Generate a single valid DuckDB SQL query that answers the user's question.\n"
-        "Use only the tables and columns shown in the schema. Prefer explicit joins.\n"
-        "DO NOT invent columns. Output ONLY the SQL (no commentary)."
+        "Use only the tables/columns present in the provided schema (exact names). "
+        "Prefer explicit joins. Do not invent columns.\n"
+        "Return ONLY the SQL (no comments, no markdown)."
     )
     if analysis_style:
         sys += "\n- Prefer GROUP BY, aggregations, top-N, counts, sums, averages, or time buckets when relevant."
-    usr = f"Schema:\n{schema_desc}\n\nQuestion: {question}\nReturn only SQL."
-    return [{"role": "system", "content": sys}, {"role": "user", "content": usr}]
+    if previous_sql:
+        sys += "\n- Modify the PREVIOUS SQL when it is relevant, keeping the same dataset scope/filters, and add only the extra logic needed."
+
+    usr = f"Schema:\n{schema_desc}\n\nQuestion: {question}\n"
+    if previous_sql:
+        usr += f"\nPREVIOUS SQL:\n{previous_sql}\n"
+    usr += "\nReturn only SQL."
+    return [{"role":"system","content":sys},{"role":"user","content":usr}]
 
 def sql_repair_prompt(question: str, schema_desc: str, bad_sql: str, error_msg: str) -> List[Dict]:
     sys = (
-        "You generated SQL that failed. Repair it to be valid DuckDB SQL given the schema.\n"
-        "Return ONLY the corrected SQL. Do not add comments or explanation."
+        "The SQL failed to run. Repair it to valid DuckDB SQL using only columns in the schema. "
+        "If you used synonyms, replace them with the exact column names from the schema. "
+        "Return ONLY the corrected SQL."
     )
-    usr = f"Schema:\n{schema_desc}\n\nQuestion: {question}\n\nBad SQL:\n{bad_sql}\n\nError:\n{error_msg}\n\nCorrected SQL (only):"
-    return [{"role": "system", "content": sys}, {"role": "user", "content": usr}]
+    usr = f"Schema:\n{schema_desc}\n\nQuestion: {question}\n\nBad SQL:\n{bad_sql}\n\nError:\n{error_msg}\n\nCorrected SQL:"
+    return [{"role":"system","content":sys},{"role":"user","content":usr}]
 
 def build_answer_prompt(user_query: str, df_summary: dict, df_csv_head: str) -> List[Dict]:
     sys = (
         "You are an expert analyst. Use ONLY the provided result rows to answer the user's question precisely.\n"
-        "Start your response with 'Answer: ...' on the first line.\n"
-        "Then add up to 5 short bullets with supporting numbers.\n"
-        "If the rows are insufficient, say exactly what data/filters are missing.\n"
-        "No code blocks, no SQL."
+        "Start with 'Answer: ...' on the first line. Then add up to 5 short supporting bullets.\n"
+        "If the rows are insufficient, say exactly what data/filters are missing. No code blocks. No SQL."
     )
     usr = f"QUESTION: {user_query}\n\nDATA SUMMARY: {json.dumps(df_summary)}\n\nRESULT ROWS (CSV head):\n{df_csv_head}"
-    return [{"role": "system", "content": sys}, {"role": "user", "content": usr}]
+    return [{"role":"system","content":sys},{"role":"user","content":usr}]
 
 # -----------------------------------------------------------------------------
-# Web flow (Wikipedia + Groq)
+# Column guard (fix common synonyms before executing)
+# -----------------------------------------------------------------------------
+MG_SYNONYM_REPLACEMENTS = [
+    (r"\bPayout\b", "total_payout"),
+    (r"\bpayout\b", "total_payout"),
+    (r"\bEligible\b", "mg_eligible"),
+    (r"\beligible\b", "mg_eligible"),
+    (r"\bUser\b", "id_user"),
+    (r"\buser\b", "id_user"),
+    (r"\buser_id\b", "id_user"),
+    (r"\bVendor\b", "vendor_name"),
+    (r"\bvendor\b", "vendor_name"),
+]
+
+def apply_mg_synonyms(sql: str) -> str:
+    if not sql: return sql
+    if not re.search(r"\bmg\b", sql, flags=re.I):  # only if query touches mg
+        return sql
+    fixed = sql
+    for pat, repl in MG_SYNONYM_REPLACEMENTS:
+        fixed = re.sub(pat, repl, fixed, flags=re.I)
+    return fixed
+
+# -----------------------------------------------------------------------------
+# Web flow
 # -----------------------------------------------------------------------------
 def fetch_wikipedia_snippet(q: str) -> str:
     try:
-        # Very small helper; not guaranteed to find a page for every query.
         term = q.strip().split("\n")[0][:150]
         url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(term)}"
         r = requests.get(url, timeout=6)
         if r.ok:
-            data = r.json()
-            extract = data.get("extract") or ""
-            return extract
+            return r.json().get("extract") or ""
     except Exception as e:
         logging.info("wiki fetch failed: %s", e)
     return ""
@@ -204,168 +204,124 @@ def fetch_wikipedia_snippet(q: str) -> str:
 def run_web_flow(q: str) -> Dict:
     snippet = fetch_wikipedia_snippet(q)
     if GROQ_API_KEY:
-        # Let Groq compose a concise answer with the snippet (if any)
-        context = f"Wikipedia says: {snippet}" if snippet else "No web snippet available."
-        msg = [
-            {"role": "system", "content": "Be concise and factual. If you have a snippet, ground your answer in it."},
-            {"role": "user", "content": f"Question: {q}\n\nContext: {context}\n\nAnswer briefly:"},
-        ]
+        ctx = f"Wikipedia says: {snippet}" if snippet else "No web snippet available."
         try:
-            answer = llm_chat(msg, temperature=0.2)
+            answer = llm_chat(
+                [
+                    {"role":"system","content":"Be concise and factual. Ground answer in context if present."},
+                    {"role":"user","content":f"Question: {q}\n\nContext: {ctx}\n\nAnswer briefly:"}
+                ], temperature=0.2
+            )
             return {"ok": True, "mode": "web", "reply": answer}
         except Exception as e:
             logging.info("Groq web answer failed: %s", e)
-    # Fallback
-    return {"ok": True, "mode": "web", "reply": snippet or "I couldn't fetch a web snippet, but I can still help analyze your data."}
+    return {"ok": True, "mode": "web", "reply": snippet or "I couldn't fetch a web snippet, but I can analyze your data."}
 
 # -----------------------------------------------------------------------------
-# Data flow (Groq → SQL → DuckDB)
+# Data flow (Groq → SQL → DuckDB, with column guard & repair)
 # -----------------------------------------------------------------------------
-def run_data_flow(question: str, analysis_style: bool = False) -> Dict:
+def run_data_flow(question: str, analysis_style: bool = False, previous_sql: Optional[str]=None) -> Dict:
     global last_result_df, last_result_sql, last_result_query
     inv, ords, mg = load_data_for_routes()
-
     schema = build_schema_description(inv, ords, mg)
-    if not GROQ_API_KEY:
-        # No Groq: naive fallback for demo safety
-        sql = "SELECT * FROM orders LIMIT 50"
-        try:
-            df = execute_sql(sql, inv, ords, mg)
-        except Exception:
-            df = pd.DataFrame()
-        last_result_df, last_result_sql, last_result_query = df, sql, question
-        return {
-            "reply": f"(fallback) Showing first {len(df)} rows from orders.",
-            "sql": sql,
-            "preview": trim_text(df_preview_string(df), 2000),
-        }
 
-    # 1) Ask Groq for SQL
-    sql_ask = sql_generation_prompt(question, schema, analysis_style=analysis_style)
+    if not GROQ_API_KEY:
+        sql = "SELECT * FROM orders LIMIT 50"
+        try: df = execute_sql(sql, inv, ords, mg)
+        except Exception: df = pd.DataFrame()
+        last_result_df, last_result_sql, last_result_query = df, sql, question
+        return {"reply": f"(fallback) Showing first {len(df)} rows from orders.", "sql": sql, "preview": trim_text(df_preview_string(df), 2000)}
+
+    # 1) ask Groq for SQL (with optional previous_sql context)
     try:
-        sql_text = llm_chat(sql_ask, temperature=0.0)
+        sql_text = llm_chat(sql_generation_prompt(question, schema, analysis_style, previous_sql), temperature=0.0)
     except Exception as e:
         return {"reply": f"SQL generation error: {e}", "sql": None, "preview": None}
-
     sql = extract_sql(sql_text)
-    # 2) Execute; if error → ask Groq to repair once
-    try:
-        df = execute_sql(sql, inv, ords, mg)
-    except Exception as ex:
-        repair_ask = sql_repair_prompt(question, schema, sql, str(ex))
-        try:
-            repaired = llm_chat(repair_ask, temperature=0.0)
-            sql = extract_sql(repaired)
-            df = execute_sql(sql, inv, ords, mg)
-        except Exception as ex2:
-            return {"reply": f"SQL failed: {ex2}", "sql": sql, "preview": None}
 
-    last_result_df, last_result_sql, last_result_query = df, sql, question
-    return {
-        "reply": f"Executed SQL. Showing first {min(50, len(df))} rows.",
-        "sql": sql,
-        "preview": trim_text(df_preview_string(df), 2000),
-    }
+    # Column guard for mg synonyms before executing
+    sql_try = apply_mg_synonyms(sql)
+
+    # 2) execute (if fail → guard again → repair with Groq)
+    try:
+        df = execute_sql(sql_try, inv, ords, mg)
+    except Exception as ex:
+        # one more synonym pass in case model returned new casing
+        sql_try2 = apply_mg_synonyms(sql_try)
+        try:
+            df = execute_sql(sql_try2, inv, ords, mg)
+            sql_try = sql_try2
+        except Exception as ex2:
+            # ask Groq to repair with explicit error
+            try:
+                repaired = llm_chat(sql_repair_prompt(question, schema, sql_try, str(ex2)), temperature=0.0)
+                sql_try = extract_sql(repaired)
+                sql_try = apply_mg_synonyms(sql_try)
+                df = execute_sql(sql_try, inv, ords, mg)
+            except Exception as ex3:
+                return {"reply": f"SQL failed: {ex3}", "sql": sql_try, "preview": None}
+
+    last_result_df, last_result_sql, last_result_query = df, sql_try, question
+    return {"reply": f"Executed SQL. Showing first {min(50, len(df))} rows.", "sql": sql_try, "preview": trim_text(df_preview_string(df), 2000)}
 
 # -----------------------------------------------------------------------------
-# Analysis flow (Groq → analysis SQL → answer from rows)
+# Analysis flow (Groq → analysis SQL → Groq answers from rows; carries follow-up context)
 # -----------------------------------------------------------------------------
 def run_analysis_flow(user_query: str) -> Dict:
-    """
-    Uses Groq to:
-      1) generate analysis-oriented SQL (aggregations / group-bys) and run it,
-      2) answer the user's question *directly from the result rows*.
-    """
     global last_result_df, last_result_sql, last_result_query
 
-    wants_reuse = any(p in (user_query or "").lower() for p in REUSE_PHRASES)
+    ql = (user_query or "").lower()
+    wants_reuse = any(p in ql for p in REUSE_PHRASES)
+    prev_sql = last_result_sql if wants_reuse else None
 
-    # Step 1: get a dataset (reuse previous result if asked)
-    if wants_reuse and last_result_df is not None:
-        df = last_result_df.copy()
-        sql_used = last_result_sql or "(previous result)"
-    else:
-        data_res = run_data_flow(user_query, analysis_style=True)
-        if not data_res.get("preview"):
-            # Bubble up any error/notice from data flow
-            return data_res
-        df = last_result_df.copy()
-        sql_used = last_result_sql
+    # Step 1: get analysis-style dataset (use previous SQL if follow-up refers to "these/previous/above")
+    data_res = run_data_flow(user_query, analysis_style=True, previous_sql=prev_sql)
+    if not data_res.get("preview"):
+        return data_res  # bubble up errors
+    df, sql_used = last_result_df.copy(), last_result_sql
 
-    # Single-cell answer? return directly.
+    # Single-cell? answer directly
     try:
-        if isinstance(df, pd.DataFrame) and df.shape == (1, 1):
-            val = df.iloc[0, 0]
-            return {
-                "reply": f"Answer: {val}\n\n(derived from: {sql_used})",
-                "sql": sql_used,
-                "preview": trim_text(df_preview_string(df), 2000),
-            }
+        if isinstance(df, pd.DataFrame) and df.shape == (1,1):
+            val = df.iloc[0,0]
+            return {"reply": f"Answer: {val}\n\n(derived from: {sql_used})", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
     except Exception:
         pass
 
-    # Step 2: Ask Groq to compose the *answer* from the actual rows
+    # Step 2: ask Groq to compose the final answer from actual rows
     if not GROQ_API_KEY:
-        # No Groq: simple fallback narrative
-        return {
-            "reply": "Analysis fallback (no Groq). See the previewed rows and compute the metric you asked.",
-            "sql": sql_used,
-            "preview": trim_text(df_preview_string(df), 2000),
-        }
+        return {"reply":"Analysis fallback (no Groq). See preview and compute manually.", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
 
-    summary = pre_analyze(df)
+    summary  = pre_analyze(df)
     csv_head = df_as_csv_snippet(df)
-    answer_msgs = build_answer_prompt(user_query, summary, csv_head)
-
     try:
-        answer = llm_chat(answer_msgs, temperature=0.0)
-        return {
-            "reply": answer,
-            "sql": sql_used,
-            "preview": trim_text(df_preview_string(df), 2000),
-        }
+        answer = llm_chat(build_answer_prompt(user_query, summary, csv_head), temperature=0.0)
+        return {"reply": answer, "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
     except Exception as ex:
         logging.info("Groq analysis answer failed: %s", ex)
-        return {
-            "reply": f"Analysis error. Here are the rows derived from: {sql_used}",
-            "sql": sql_used,
-            "preview": trim_text(df_preview_string(df), 2000),
-        }
+        return {"reply": f"Analysis error. Rows derived from: {sql_used}", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
 
 # -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
 @app.get("/")
-def index():
-    return render_template("index.html")
+def index(): return render_template("index.html")
 
 @app.get("/health")
-def health():
-    return "ok", 200
+def health(): return "ok", 200
 
 @app.post("/ask")
 def ask():
     payload = request.get_json(force=True) or {}
-    q = (payload.get("q") or payload.get("query") or "").strip()
+    q    = (payload.get("q") or payload.get("query") or "").strip()
     mode = (payload.get("mode") or "web").lower()
 
     if not q:
         return safe_json({"ok": True, "mode": mode, "reply": "Please type a question."})
 
-    if mode == "analysis":
-        res = run_analysis_flow(q)
-        return safe_json(res)
-
-    if mode == "data":
-        res = run_data_flow(q, analysis_style=False)
-        return safe_json(res)
-
-    # default: web
-    res = run_web_flow(q)
-    return safe_json(res)
-
-# -----------------------------------------------------------------------------
-# Local dev
+    if mode == "analysis": return safe_json(run_analysis_flow(q))
+    if mode == "data":     return safe_json(run_data_flow(q, analysis_style=False))
+    return safe_json(run_web_flow(q))  # web
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT","8000")), debug=True)
