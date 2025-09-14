@@ -238,3 +238,5 @@ button#send[disabled]{ opacity:.6; cursor:not-allowed }
 .table-scroll{overflow:auto;max-width:100%}
 table.mini{border-collapse:collapse;font-size:12px}
 table.mini th,table.mini td{border:1px solid rgba(0,0,0,.06);padding:6px 8px;white-space:nowrap}
+
+.overlay, .glass, .blur, .backdrop { pointer-events: none; }
