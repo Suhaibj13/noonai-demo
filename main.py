@@ -38,7 +38,7 @@ def _fix_nans(obj):
 def safe_json(data, status=200):
     return jsonify(_fix_nans(data)), status
 
-API_PATHS = {"/", "/run_step", "/healthz"}
+API_PATHS = {"/", "/run_step", "/healthz", "/ask", "/diagz"}
 
 def _wants_json() -> bool:
     try:
@@ -629,45 +629,47 @@ def run_step():
     reply = f"Ran step '{step}' for project '{project}'."
     return safe_json({"ok": True, "reply": reply, "sql": None, "preview": None, "mode": "web"})
 
-@app.post("/ask", methods=["POST"])
+@app.post("/ask")
 def ask():
     payload = request.get_json(force=True) or {}
-    q = (payload.get("q") or "").strip()
+    # Accept both new 'q' and old 'query'
+    q = (payload.get("q") or payload.get("query") or "").strip()
     mode = (payload.get("mode") or "web").lower()
     datasets = payload.get("datasets") or []
     file_hints = payload.get("fileHints") or []
 
-    # ===== APPEND (new analysis branch) =====
+    if not q:
+        return safe_json({"ok": True, "reply": "Please enter a question.", "mode": mode})
+
+    # ===== Analysis branch (returns 'type: insights' for the UI) =====
     if mode == "analysis":
         result = run_analysis_router(q, datasets=datasets, file_hints=file_hints)
-        return jsonify(result), 200
-        
-    body = request.get_json(silent=True) or {}
-    user_query = (body.get("query") or "").strip()
-    mode = (body.get("mode") or "data").lower()
-    if not user_query:
-        return safe_json({"ok": True, "reply": "Please enter a question."})
-    if user_query.lower() in {"new chat","/new","reset"}:
-        return safe_json({"ok": True, "reply": "Started a new chat."})
+        # Don't wrap with {"ok":...} so the UI can read resp.type === "insights"
+        return safe_json(result, 200)
 
-    # Quick intent that must always work
-    if mode in ("data","analysis") and "total customer" in user_query.lower():
+    # ===== Quick intent that must always work =====
+    if mode in ("data", "analysis") and "total customer" in q.lower():
         inv, ords, mg = load_data_for_routes()
         count = int(ords["user_id"].dropna().nunique())
-        return safe_json({"ok": True, "reply": f"Total distinct customers: {count}", "sql": None})
+        return safe_json({"ok": True, "reply": f"Total distinct customers: {count}", "sql": None, "mode": mode})
 
+    # ===== Normal flows (data/web) =====
     try:
         if mode == "data":
-            res = run_data_flow(user_query, analysis_style=False)
-        elif mode == "analysis":
-            # reuse same dataset generation but you can add narrative later
-            res = run_data_flow(user_query, analysis_style=True)
+            res = run_data_flow(q, analysis_style=False)
         elif mode == "web":
-            return safe_json({"ok": True, "reply": fetch_online_answer(user_query), "sql": None, "preview": None, "mode": "web"})
+            return safe_json({"ok": True, "reply": fetch_online_answer(q), "sql": None, "preview": None, "mode": "web"})
         else:
-            res = run_data_flow(user_query, analysis_style=False)
+            # Unknown mode → default to "data" but warn in reply
+            res = run_data_flow(q, analysis_style=False)
             res["reply"] = f"(demo) Unknown mode '{mode}'. Defaulted to Data.\n\n{res['reply']}"
-        return safe_json({"ok": True, "reply": res.get("reply",""), "sql": res.get("sql"), "preview": res.get("preview"), "mode": mode})
+        return safe_json({
+            "ok": True,
+            "reply": res.get("reply", ""),
+            "sql": res.get("sql"),
+            "preview": res.get("preview"),
+            "mode": mode
+        })
     except Exception as e:
         logging.exception("ask failed")
         return safe_json({"ok": False, "error": str(e)}, 500)
