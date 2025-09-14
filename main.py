@@ -1,830 +1,371 @@
+# main.py — Noon AI (restored architecture: Groq for Web/Data/Analysis)
+from __future__ import annotations
 
-# main.py
-from flask import Flask, render_template, request, jsonify
-import os, re, difflib, duckdb, requests, math, logging
-from dotenv import load_dotenv
-from pathlib import Path
-from datetime import timedelta
+import os
+import re
+import json
+import textwrap
+import logging
+from typing import Dict, List, Optional, Tuple
+
+import duckdb
 import pandas as pd
-import numpy as np
+import requests
+from flask import Flask, jsonify, render_template, request
+from dotenv import load_dotenv
 
+# -----------------------------------------------------------------------------
+# Init
+# -----------------------------------------------------------------------------
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
-# Make dtype coercion optional to reduce memory pressure in prod
-COERCE_DTYPES = bool(int(os.getenv("COERCE_DTYPES", "0")))  # 0 = off (light mode), 1 = on
-
-# ============ Optional LLM client (only used if key is set) ============
-try:
-    from groq import Groq
-except Exception:
-    Groq = None
-
-def get_groq_client():
-    key = os.getenv("GROQ_API_KEY")
-    if Groq and key:
-        return Groq(api_key=key)
-    return None
-
-# ============ Flask setup ============
 app = Flask(__name__, static_folder="static", template_folder="templates")
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-BASE_DIR = Path(__file__).resolve().parent  # /opt/render/project/src on Render
 
-# --------------- JSON helpers ---------------
-def _fix_nans(obj):
-    if isinstance(obj, float) and math.isnan(obj): return None
-    if isinstance(obj, dict):  return {k: _fix_nans(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)): return [_fix_nans(v) for v in obj]
-    return obj
-def safe_json(data, status=200):
-    return jsonify(_fix_nans(data)), status
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-API_PATHS = {"/ask", "/run_step", "/healthz"}
+# Memory for reuse in Analysis follow-ups
+last_result_df: Optional[pd.DataFrame] = None
+last_result_sql: Optional[str] = None
+last_result_query: Optional[str] = None
+REUSE_PHRASES = ["same as above", "use above", "previous result", "same dataset", "same data"]
 
-def _wants_json() -> bool:
-    try:
-        return request.path in API_PATHS or "application/json" in (request.headers.get("Accept") or "")
-    except Exception:
-        return False
-
-# --------------- Never send HTML to API paths ---------------
-@app.errorhandler(Exception)
-def _err_any(e):
-    # Turn absolutely any error into JSON for API paths
-    if _wants_json():
-        logging.exception("Unhandled exception")
-        code = getattr(e, "code", 500)
-        return safe_json({"ok": False, "error": str(e), "code": code}, code)
-    # Non-API paths can keep Flask's default HTML page
-    raise e
-
-@app.errorhandler(404)
-def _err_404(e):
-    return safe_json({"ok": False, "error": "Not Found", "code": 404}, 404) if _wants_json() else ("Not Found", 404)
-
-@app.errorhandler(405)
-def _err_405(e):
-    return safe_json({"ok": False, "error": "Method Not Allowed", "code": 405}, 405) if _wants_json() else ("Method Not Allowed", 405)
-
-# ============ Schema + aliases (same as before) ============
-SCHEMA_CONFIG = {
-    "orders": {
-        "columns": [
-            "id","order_id","user_id","product_id","inventory_item_id",
-            "status","created_at","shipped_at","delivered_at","returned_at","sale_price"
-        ],
-        "dtypes": {
-            "id":"Int64","order_id":"Int64","user_id":"Int64","product_id":"Int64",
-            "inventory_item_id":"Int64","status":"string",
-            "created_at":"datetime64[ns]","shipped_at":"datetime64[ns]","delivered_at":"datetime64[ns]","returned_at":"datetime64[ns]",
-            "sale_price":"Float64"
-        },
-        "aliases": {"price":"sale_price","customer_id":"user_id","buyer_id":"user_id","client_id":"user_id"}
-    },
-    "inventory": {
-        "columns": [
-            "id","product_id","created_at","sold_at","cost","product_category","product_name",
-            "product_brand","product_retail_price","product_department","product_sku",
-            "product_distribution_center_id"
-        ],
-        "dtypes": {
-            "id":"Int64","product_id":"Int64","created_at":"datetime64[ns]","sold_at":"datetime64[ns]",
-            "cost":"Float64","product_category":"string","product_name":"string","product_brand":"string",
-            "product_retail_price":"Float64","product_department":"string","product_sku":"string",
-            "product_distribution_center_id":"Int64"
-        },
-        "aliases": {"unit_cost":"cost","buy_price":"cost"}
-    },
-    "mg": {
-        "columns": [
-            "month","id_user","name","fleet","city","vendor_name","rate","joining_date",
-            "total_calendar_days","attendance","total_attendance","perfect_attendance","pa_needed",
-            "mg_eligible","total_delivered_month","monthly_mg","eligible_mg","mg_month",
-            "payout","mg_amount","total_payout","mot","final_mg_check","fnd_ndr_penalty_amount",
-            "da_level_final_amount"
-        ],
-        "dtypes": {
-            "month":"string","id_user":"Int64","name":"string","fleet":"string","city":"string",
-            "vendor_name":"string","rate":"Float64","joining_date":"datetime64[ns]",
-            "total_calendar_days":"Int64","attendance":"Int64","total_attendance":"Int64",
-            "perfect_attendance":"Int64","pa_needed":"Int64","mg_eligible":"Int64",
-            "total_delivered_month":"Int64","monthly_mg":"Float64","eligible_mg":"Float64",
-            "mg_month":"Int64","payout":"Float64","mg_amount":"Float64","total_payout":"Float64",
-            "mot":"string","final_mg_check":"string","fnd_ndr_penalty_amount":"Float64",
-            "da_level_final_amount":"Float64"
-        },
-        "aliases": {"vendor":"vendor_name","final_amount":"da_level_final_amount","penalty":"fnd_ndr_penalty_amount"}
-    }
-}
-
-COLUMN_SYNONYMS = {
-    "orders": {"user_id":["customer","customer_id","buyer_id","client_id"], "sale_price":["price","unit_price","amount"], "order_id":["oid","sales_order_id"]},
-    "inventory": {"product_id":["pid","item_id"], "cost":["unit_cost","buy_price"]},
-    "mg": {"vendor_name":["vendor"], "fnd_ndr_penalty_amount":["penalty","fnd_ndr_penalty"], "da_level_final_amount":["final_amount","da_final_amount"]}
-}
-
-# --------------- Schema helpers ---------------
-def _apply_aliases(df: pd.DataFrame, aliases: dict) -> pd.DataFrame:
-    to_rename, lower_cols = {}, {c.lower(): c for c in df.columns}
-    for alias, canonical in aliases.items():
-        if alias.lower() in lower_cols:
-            to_rename[lower_cols[alias.lower()]] = canonical
-    return df.rename(columns=to_rename) if to_rename else df
-
-def _enforce_schema(df: pd.DataFrame, table: str) -> pd.DataFrame:
+# -----------------------------------------------------------------------------
+# Groq client (lazy)
+# -----------------------------------------------------------------------------
+def llm_chat(messages: List[Dict], temperature: float = 0.0) -> str:
     """
-    Light mode (default): only ensure required columns exist and order them.
-    This avoids costly pandas dtype conversions that can OOM on small instances.
-
-    If COERCE_DTYPES=1, we do a gentler coercion (datetime via utc path; numeric with errors='coerce').
+    Minimal Groq chat wrapper. If GROQ_API_KEY is missing, raise.
     """
-    spec = SCHEMA_CONFIG[table]
-
-    # 1) Ensure all expected columns exist
-    for col in spec["columns"]:
-        if col not in df.columns:
-            df[col] = pd.NA
-
-    # 2) Optional, gentler coercion (OFF by default)
-    if COERCE_DTYPES:
-        for col, dt in spec["dtypes"].items():
-            if col not in df.columns:
-                continue
-            try:
-                if dt == "datetime64[ns]":
-                    # Lighter datetime path: coerce with UTC, then drop tz
-                    s = pd.to_datetime(df[col], errors="coerce", utc=True)
-                    df[col] = s.dt.tz_convert(None)
-                elif dt in ("Int64", "Float64"):
-                    df[col] = pd.to_numeric(df[col], errors="coerce").astype(dt)
-                elif dt == "string":
-                    df[col] = df[col].astype("string")
-                else:
-                    df[col] = df[col].astype(dt)
-            except Exception:
-                # If anything goes wrong, keep original values (don’t crash / OOM)
-                pass
-
-    # 3) Return columns in the canonical order
-    return df[spec["columns"]]
-
-def _read_first(path_list):
-    for p in path_list:
-        p_abs = (BASE_DIR / p)
-        if p_abs.exists():
-            return pd.read_csv(p_abs,low_memory=True)
-    return None
-
-# ============ Data loading (Render-safe) ============
-def read_csv_safe(path: Path, name: str):
-    """
-    Try multiple encodings and parsers so we don't 500 on slightly messy CSVs.
-    Returns (df, meta) or raises RuntimeError with a concise trail.
-    """
-    attempts = [
-        dict(encoding="utf-8-sig", engine="c", low_memory=False),
-        dict(encoding="utf-8",     engine="c", low_memory=False),
-        dict(encoding="latin-1",   engine="c", low_memory=False),
-        # very forgiving fallback (slower): skips bad rows rather than dying
-        dict(encoding="utf-8",     engine="python", on_bad_lines="skip", low_memory=False),
-        dict(encoding="latin-1",   engine="python", on_bad_lines="skip", low_memory=False),
-    ]
-    errors = []
-    for kw in attempts:
-        try:
-            df = pd.read_csv(path, **kw)
-            meta = {
-                "name": name,
-                "path": str(path),
-                "encoding": kw.get("encoding"),
-                "engine": kw.get("engine"),
-                "on_bad_lines": kw.get("on_bad_lines", "error"),
-                "rows": int(df.shape[0]),
-                "cols": int(df.shape[1]),
-            }
-            return df, meta
-        except Exception as e:
-            errors.append(f"{kw.get('encoding')}/{kw.get('engine')}/{kw.get('on_bad_lines','error')}: {type(e).__name__}: {e}")
-    raise RuntimeError(f"Failed to read {name} at {path}. Tried -> " + " | ".join(errors))
-
-
-def read_first_safe(candidates, name: str):
-    """
-    First existing path from candidates, read it via read_csv_safe.
-    Returns (df, meta) or (None, {'name':..., 'missing': True, 'tried': [...]})
-    """
-    tried = []
-    for fname in candidates:
-        p = (BASE_DIR / fname)
-        if p.exists():
-            df, meta = read_csv_safe(p, name)
-            meta["resolved"] = fname
-            return df, meta
-        tried.append(str(p))
-    return None, {"name": name, "missing": True, "tried": tried}
-
-def load_data():
-    # inventory.csv
-    inv_df, inv_meta = read_csv_safe(BASE_DIR / "inventory.csv", "inventory.csv")
-    # orders.csv
-    ord_df, ord_meta = read_csv_safe(BASE_DIR / "orders.csv", "orders.csv")
-    # minimum_guarantee.csv (or tolerated alternatives)
-    mg_df, mg_meta = read_first_safe(
-        ["minimum_guarantee.csv", "Minimum_Guarantee.csv", "mg.csv"],
-        "minimum_guarantee.csv"
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not set.")
+    # Lazy import to avoid hard dependency if not used
+    from groq import Groq
+    client = Groq(api_key=GROQ_API_KEY)
+    resp = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=messages,
+        temperature=temperature,
     )
+    return resp.choices[0].message.content.strip()
 
-    # Normalize/alias
-    inv_df.columns = [c.strip().lower() for c in inv_df.columns]
-    ord_df.columns = [c.strip().lower() for c in ord_df.columns]
-    if mg_df is not None:
-        mg_df.columns = [c.strip().lower().replace(" ", "_") for c in mg_df.columns]
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+def safe_json(obj, status=200):
+    return jsonify(obj), status
 
-    inv_df  = _apply_aliases(inv_df,  SCHEMA_CONFIG["inventory"]["aliases"])
-    ord_df  = _apply_aliases(ord_df,  SCHEMA_CONFIG["orders"]["aliases"])
-    if mg_df is not None:
-        mg_df = _apply_aliases(mg_df, SCHEMA_CONFIG["mg"]["aliases"])
+def trim_text(s: str, max_chars: int = 2000) -> str:
+    s = s or ""
+    return s if len(s) <= max_chars else s[:max_chars] + "\n..."
 
-    # Enforce schemas (never crash)
-    inv = _enforce_schema(inv_df, "inventory")
-    ords = _enforce_schema(ord_df, "orders")
-    mg  = _enforce_schema(mg_df, "mg") if mg_df is not None else pd.DataFrame(columns=SCHEMA_CONFIG["mg"]["columns"])
+def extract_sql(text: str) -> str:
+    """
+    Extract SQL from a response that may contain ```sql blocks``` or plain SQL.
+    """
+    if not text:
+        return ""
+    m = re.search(r"```sql(.*?)```", text, flags=re.S | re.I)
+    if m:
+        return m.group(1).strip().strip(";")
+    m2 = re.search(r"```(.*?)```", text, flags=re.S | re.I)
+    if m2:
+        return m2.group(1).strip().strip(";")
+    return text.strip().strip(";")
 
-    # Helpful logs once at startup/use
-    logging.info("CSV OK • inventory=%s rows • orders=%s rows • mg=%s rows",
-                 inv.shape[0], ords.shape[0], (mg.shape[0] if mg is not None else 0))
+def df_preview_string(df: pd.DataFrame, rows: int = 50) -> str:
+    try:
+        return df.head(rows).to_string(index=False)
+    except Exception:
+        # fallback
+        return str(df.head(rows))
 
-    # Return dataframes + lightweight meta so /healthz can show what happened
-    return inv, ords, mg, {"inventory": inv_meta, "orders": ord_meta, "mg": mg_meta}
+def df_as_csv_snippet(df: pd.DataFrame, max_rows=300, max_chars=18000) -> str:
+    if df is None or df.empty:
+        return ""
+    try:
+        csv = df.head(max_rows).to_csv(index=False)
+        return csv if len(csv) <= max_chars else (csv[:max_chars] + "\n...")
+    except Exception:
+        return df.head(50).to_string(index=False)
 
-def load_data_for_routes():
-    inv, ords, mg, _ = load_data()
+def pre_analyze(df: pd.DataFrame) -> Dict:
+    if df is None or df.empty:
+        return {"rows": 0, "cols": 0}
+    numeric = df.select_dtypes(include="number").columns.tolist()
+    summary = {
+        "rows": int(df.shape[0]),
+        "cols": int(df.shape[1]),
+        "numeric_cols": numeric[:10],
+    }
+    return summary
+
+# -----------------------------------------------------------------------------
+# Data loading (CSV)
+# -----------------------------------------------------------------------------
+def read_csv_if_exists(path: str) -> pd.DataFrame:
+    if os.path.exists(path):
+        try:
+            return pd.read_csv(path)
+        except Exception as e:
+            logging.warning("Failed to read %s: %s", path, e)
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+def load_data_for_routes() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Returns (inventory_df, orders_df, mg_df)
+    Looks for standard filenames at repo root.
+    """
+    inv = read_csv_if_exists("inventory.csv")
+    ords = read_csv_if_exists("orders.csv")
+    mg = read_csv_if_exists("minimum_guarantee.csv")
+    # Normalize likely date columns (best effort, non-fatal)
+    for df in (inv, ords, mg):
+        for col in df.columns:
+            if "date" in col.lower() or "created_at" in col.lower() or "sold_at" in col.lower():
+                try:
+                    df[col] = pd.to_datetime(df[col], errors="ignore")
+                except Exception:
+                    pass
     return inv, ords, mg
-    
-# ============ SQL helpers & rules ============
-def normalize_time_literals(sql: str) -> str:
-    sql = re.sub(r"\bCURRENT_TIMESTAMP\b", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)", sql, flags=re.I)
-    sql = re.sub(r"\bNOW\(\)", "CAST(NOW() AS TIMESTAMP)", sql, flags=re.I)
-    sql = re.sub(r"\bCURRENT_DATE\b", "CAST(CURRENT_DATE AS TIMESTAMP)", sql, flags=re.I)
-    return sql
 
-def validate_sql_columns(sql: str, inv_cols: list, ord_cols: list, mg_cols: list):
-    missing = []
-    inv_lower = [c.lower() for c in inv_cols]
-    ord_lower = [c.lower() for c in ord_cols]
-    mg_lower  = [c.lower() for c in mg_cols]
-    for alias, cols in (("i", inv_lower), ("inventory", inv_lower),
-                        ("o", ord_lower), ("orders", ord_lower),
-                        ("m", mg_lower), ("mg", mg_lower)):
-        for m in re.findall(rf"\b{alias}\.(\w+)\b", sql, flags=re.I):
-            if m.lower() not in cols:
-                t = "inventory" if alias in ("i","inventory") else "orders" if alias in ("o","orders") else "mg"
-                missing.append(f"{t}.{m}")
-    return (len(missing) == 0, missing)
+# -----------------------------------------------------------------------------
+# DuckDB execution
+# -----------------------------------------------------------------------------
+def build_memory_db(inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFrame):
+    con = duckdb.connect(database=":memory:")
+    con.register("inventory", inv)
+    con.register("orders", ords)
+    con.register("mg", mg)
+    return con
 
-def suggest_similar_columns(missing_cols: list, table_cols: dict, tables_to_dfs: dict, synonyms_map: dict, max_suggestions=5):
-    suggestions = {}
-    def first_non_null(df, col):
-        try:
-            s = df[col].dropna()
-            return "" if s.empty else str(s.iloc[0])[:80]
-        except Exception:
-            return ""
-    for miss in missing_cols:
-        table, col = (miss.split(".", 1) if "." in miss else ("orders", miss))
-        table, col = table.lower().strip(), col.lower().strip()
-        cands = [c for c in table_cols.get(table, [])]
-        df = tables_to_dfs.get(table)
-        syn_hits = []
-        for canon, alts in synonyms_map.get(table, {}).items():
-            if canon in cands and (col == canon or col in [a.lower() for a in alts]):
-                syn_hits.append(canon)
-        sub_hits = [c for c in cands if col in c or c in col]
-        fuzzy_hits = difflib.get_close_matches(col, cands, n=max_suggestions, cutoff=0.6)
-        merged = []
-        for arr in (syn_hits, sub_hits, fuzzy_hits):
-            for x in arr:
-                if x not in merged:
-                    merged.append(x)
-        merged = merged[:max_suggestions]
-        enriched = [{"col": c, "sample": first_non_null(df, c) if df is not None else ""} for c in merged]
-        suggestions[miss] = enriched
-    return suggestions
+def execute_sql(sql: str, inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFrame) -> pd.DataFrame:
+    con = build_memory_db(inv, ords, mg)
+    return con.execute(sql).fetch_df()
 
-def rule_orders_by_value_desc(user_query: str) -> str | None:
-    q = (user_query or "").lower()
-    if "orders" not in q: return None
-    if "value" in q and any(k in q for k in ("decreas","desc","descending","highest")):
-        m = re.search(r"\b(top|first|limit|give me|show me)\s*(\d+)", q)
-        n = int(m.group(2)) if m else 500
-        return f"SELECT * FROM orders ORDER BY sale_price DESC LIMIT {n}"
-    return None
+# -----------------------------------------------------------------------------
+# Schema/Prompt builders
+# -----------------------------------------------------------------------------
+def build_schema_description(inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFrame) -> str:
+    def one(df, name):
+        cols = [f"- {c}: {str(df[c].dtype)}" for c in df.columns]
+        return f"Table {name} columns:\n" + ("\n".join(cols) if cols else "(empty)")
+    return "\n\n".join([one(inv, "inventory"), one(ords, "orders"), one(mg, "mg")])
 
-def rule_mg_sql(user_query: str) -> str | None:
-    q = (user_query or "").lower()
-    if "minimum guarantee" in q or "mg" in q or "logistics" in q:
-        return """
-SELECT month, city, vendor_name, fleet, id_user, name,
-       rate, attendance, perfect_attendance, mg_eligible,
-       total_delivered_month, monthly_mg, eligible_mg,
-       fnd_ndr_penalty_amount, da_level_final_amount, total_payout
-FROM mg
-ORDER BY total_payout DESC NULLS LAST
-LIMIT 200
-""".strip()
-    return None
+def sql_generation_prompt(question: str, schema_desc: str, analysis_style: bool) -> List[Dict]:
+    sys = (
+        "You are a senior data analyst. Generate a single valid DuckDB SQL query that answers the user's question.\n"
+        "Use only the tables and columns shown in the schema. Prefer explicit joins.\n"
+        "DO NOT invent columns. Output ONLY the SQL (no commentary)."
+    )
+    if analysis_style:
+        sys += "\n- Prefer GROUP BY, aggregations, top-N, counts, sums, averages, or time buckets when relevant."
+    usr = f"Schema:\n{schema_desc}\n\nQuestion: {question}\nReturn only SQL."
+    return [{"role": "system", "content": sys}, {"role": "user", "content": usr}]
 
-def _parse_top_n(query: str, default_n=5) -> int:
-    m = re.search(r"\btop\s+(\d+)\b", query.lower())
-    return int(m.group(1)) if m else default_n
+def sql_repair_prompt(question: str, schema_desc: str, bad_sql: str, error_msg: str) -> List[Dict]:
+    sys = (
+        "You generated SQL that failed. Repair it to be valid DuckDB SQL given the schema.\n"
+        "Return ONLY the corrected SQL. Do not add comments or explanation."
+    )
+    usr = f"Schema:\n{schema_desc}\n\nQuestion: {question}\n\nBad SQL:\n{bad_sql}\n\nError:\n{error_msg}\n\nCorrected SQL (only):"
+    return [{"role": "system", "content": sys}, {"role": "user", "content": usr}]
 
-def _parse_threshold(query: str, default_th=10) -> int:
-    q = query.lower()
-    m = re.search(r"(threshold|below|less than)\s+(\d+)", q)
-    return int(m.group(2)) if m else default_th
+def build_answer_prompt(user_query: str, df_summary: dict, df_csv_head: str) -> List[Dict]:
+    sys = (
+        "You are an expert analyst. Use ONLY the provided result rows to answer the user's question precisely.\n"
+        "Start your response with 'Answer: ...' on the first line.\n"
+        "Then add up to 5 short bullets with supporting numbers.\n"
+        "If the rows are insufficient, say exactly what data/filters are missing.\n"
+        "No code blocks, no SQL."
+    )
+    usr = f"QUESTION: {user_query}\n\nDATA SUMMARY: {json.dumps(df_summary)}\n\nRESULT ROWS (CSV head):\n{df_csv_head}"
+    return [{"role": "system", "content": sys}, {"role": "user", "content": usr}]
 
-def rule_inventory_sql(user_query: str) -> str | None:
-    q = (user_query or "").lower()
-    if not any(k in q for k in ["inventory","stockout","stock out","overstock","on hand","reorder","slow-moving","slow moving"]):
-        return None
-    want_monthly = ("month" in q or "monthly" in q)
-    want_slow = any(k in q for k in ["slow","overstock"])
-    want_reorder = any(k in q for k in ["reorder","low stock","low inventory","stockout","stock out"])
-    want_top_sold = any(k in q for k in ["most sold","top sold","best seller","bestseller","most selling","top sales","top sold items"])
-    top_n = _parse_top_n(q, 5); th = _parse_threshold(q, 10)
-
-    base_ctes = """
-WITH sold AS (
-  SELECT o.product_id, COUNT(*) AS units_sold
-  FROM orders o
-  WHERE o.product_id IS NOT NULL
-  GROUP BY 1
-),
-stock AS (
-  SELECT i.product_id,
-         SUM(CASE WHEN i.sold_at IS NULL THEN 1 ELSE 0 END) AS on_hand
-  FROM inventory i
-  WHERE i.product_id IS NOT NULL
-  GROUP BY 1
-),
-dim AS (
-  SELECT
-    coalesce(s.product_id, st.product_id) AS product_id,
-    coalesce(st.on_hand, 0) AS on_hand,
-    coalesce(s.units_sold, 0) AS units_sold,
-    max(inv.product_name) AS product_name,
-    max(inv.product_brand) AS product_brand,
-    max(inv.product_category) AS product_category
-  FROM sold s
-  FULL OUTER JOIN stock st ON s.product_id = st.product_id
-  LEFT JOIN inventory inv ON inv.product_id = coalesce(s.product_id, st.product_id)
-  GROUP BY 1,2,3
-)
-"""
-    if want_top_sold and not want_monthly:
-        return f"{base_ctes}\nSELECT product_id, product_name, product_brand, product_category, units_sold, on_hand FROM dim ORDER BY units_sold DESC LIMIT {top_n}"
-    if want_reorder and not want_monthly:
-        return f"{base_ctes}\nSELECT product_id, product_name, product_brand, product_category, units_sold, on_hand FROM dim WHERE on_hand < {th} ORDER BY on_hand ASC, units_sold DESC LIMIT 100"
-    if want_slow and not want_monthly:
-        return f"{base_ctes}\nSELECT product_id, product_name, product_brand, product_category, units_sold, on_hand FROM dim WHERE on_hand >= {th} AND units_sold <= 1 ORDER BY on_hand DESC LIMIT 100"
-    if want_monthly:
-        return """
-WITH monthly AS (
-  SELECT DATE_TRUNC('month', o.created_at) AS year_month, o.product_id, COUNT(*) AS units_sold
-  FROM orders o
-  WHERE o.product_id IS NOT NULL AND o.created_at IS NOT NULL
-  GROUP BY 1,2
-),
-stock AS (
-  SELECT i.product_id, SUM(CASE WHEN i.sold_at IS NULL THEN 1 ELSE 0 END) AS on_hand
-  FROM inventory i
-  WHERE i.product_id IS NOT NULL
-  GROUP BY 1
-),
-dim AS (
-  SELECT m.year_month, m.product_id, m.units_sold, coalesce(st.on_hand,0) AS on_hand,
-         max(inv.product_name) AS product_name, max(inv.product_brand) AS product_brand,
-         max(inv.product_category) AS product_category
-  FROM monthly m
-  LEFT JOIN stock st ON st.product_id = m.product_id
-  LEFT JOIN inventory inv ON inv.product_id = m.product_id
-  GROUP BY 1,2,3,4
-)
-SELECT year_month, product_id, product_name, product_brand, product_category, units_sold, on_hand
-FROM dim
-ORDER BY year_month DESC, units_sold DESC
-""".strip()
-    return f"{base_ctes}\nSELECT product_id, product_name, product_brand, product_category, units_sold, on_hand FROM dim ORDER BY units_sold DESC, on_hand ASC LIMIT 100"
-
-# ============ LLM SQL (optional) ============
-def build_schema_manifest(inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFrame) -> str:
-    def col_line(df, col):
-        s = df[col].dropna(); sample = "" if s.empty else f" sample={repr(str(s.iloc[0])[:40])}"
-        return f"{col} {str(df[col].dtype)} nullable={df[col].isna().any()}{sample}"
-    lines = ["Tables and columns (DuckDB dtypes):"]
-    lines.append("[inventory]");  lines += ["  - " + col_line(inv, c) for c in SCHEMA_CONFIG["inventory"]["columns"] if c in inv.columns]
-    lines.append("[orders]");     lines += ["  - " + col_line(ords, c) for c in SCHEMA_CONFIG["orders"]["columns"] if c in ords.columns]
-    lines.append("[mg]");         lines += ["  - " + col_line(mg, c) for c in SCHEMA_CONFIG["mg"]["columns"] if c in mg.columns]
-    return "\n".join(lines)
-
-SQL_SYSTEM_PROMPT = """
-You are SAGE-SQL for DuckDB.
-Return EXACTLY ONE valid SQL SELECT statement and nothing else.
-Use ONLY the provided tables and columns. No DDL/DML. No comments. No code fences.
-When comparing to TIMESTAMP columns, cast NOW()/CURRENT_TIMESTAMP/CURRENT_DATE to TIMESTAMP.
-"""
-
-ANALYSIS_SQL_SYSTEM_PROMPT = """
-You are SAGE-SQL for DuckDB.
-Return EXACTLY ONE valid SQL SELECT statement for analysis (aggregations/trends).
-Prefer GROUP BY (e.g., by month, user_id) over raw row dumps. No comments or code fences.
-"""
-
-FEW_SHOTS = """
-Q: top 50 orders by sale_price
-A: SELECT * FROM orders ORDER BY sale_price DESC LIMIT 50
-
-Q: monthly units by product_id
-A: SELECT date_trunc('month', created_at) AS month, product_id, COUNT(*) AS units
-   FROM orders
-   WHERE created_at IS NOT NULL AND product_id IS NOT NULL
-   GROUP BY 1,2
-   ORDER BY month DESC
-""".strip()
-
-def llm_generate_sql_with_prompt(user_query: str, manifest: str, system_prompt: str) -> str:
-    client = get_groq_client()
-    if not client:
-        raise RuntimeError("Groq client not configured")
-    msgs = [{"role":"system","content":system_prompt},
-            {"role":"user","content":f"{manifest}\n\n{FEW_SHOTS}\n\nQ: {user_query}\nA:"}]
-    resp = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0)
-    return resp.choices[0].message.content.strip()
-
-def llm_repair_sql(bad_sql: str, error_text: str, manifest: str) -> str:
-    client = get_groq_client()
-    if not client:
-        raise RuntimeError("Groq client not configured")
-    repair_prompt = f"""
-The following SQL failed in DuckDB. Fix it. Keep ONLY one valid SELECT.
-
-Manifest:
-{manifest}
-
-Failed SQL:
-{bad_sql}
-
-Error:
-{error_text}
-
-Return only the corrected SQL:
-""".strip()
-    msgs = [{"role":"system","content":SQL_SYSTEM_PROMPT},{"role":"user","content":repair_prompt}]
-    resp = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0)
-    return resp.choices[0].message.content.strip()
-
-# ============ Data exec & flows ============
-SQL_START_RE = re.compile(r"\bselect\b", re.I)
-def clean_sql_output(text: str) -> str:
-    if not text: return ""
-    s = (str(text).replace("```sql","").replace("```","")
-                   .replace("Here is the SQL:","").replace("Here’s the SQL:","")
-                   .replace("Here is the query:","").replace("SQL:","").replace("Query:","")).strip()
-    m = SQL_START_RE.search(s);  s = s[m.start():] if m else s
-    s = re.sub(r"--.*?$", "", s, flags=re.M); s = re.sub(r"/\*.*?\*/", "", s, flags=re.S).strip()
-    parts = [p.strip() for p in s.split(";") if p.strip()]
-    first = next((p for p in parts if p.lower().startswith("select")), s)
-    return first if first.lower().startswith("select") else ""
-
-def default_orders_sql() -> str:
-    return "SELECT * FROM orders ORDER BY created_at DESC NULLS LAST"
-
-def run_sql(sql: str, inv: pd.DataFrame, ords: pd.DataFrame, mg: pd.DataFrame) -> pd.DataFrame:
-    con = duckdb.connect()
-    con.register("orders", ords); con.register("inventory", inv); con.register("mg", mg)
-    return con.execute(sql).fetchdf()
-
-def build_schema_and_sql(user_query: str, analysis_style: bool):
-    inv, ords, mg = load_data_for_routes()
-    manifest = build_schema_manifest(inv, ords, mg)
-    sql = (rule_mg_sql(user_query) or rule_inventory_sql(user_query) or rule_orders_by_value_desc(user_query))
-    if not sql:
-        try:
-            sys_prompt = ANALYSIS_SQL_SYSTEM_PROMPT if analysis_style else SQL_SYSTEM_PROMPT
-            sql = llm_generate_sql_with_prompt(user_query, manifest, sys_prompt)
-        except Exception:
-            logging.exception("LLM SQL generation unavailable; using default query")
-            sql = default_orders_sql()
-    return inv, ords, mg, manifest, normalize_time_literals(clean_sql_output(sql)) or default_orders_sql()
-
-def run_data_flow(user_query: str, *, analysis_style: bool = False):
-    inv, ords, mg, manifest, sql = build_schema_and_sql(user_query, analysis_style)
-
-    ok, missing = validate_sql_columns(sql,
-                                       SCHEMA_CONFIG["inventory"]["columns"],
-                                       SCHEMA_CONFIG["orders"]["columns"],
-                                       SCHEMA_CONFIG["mg"]["columns"])
-    if not ok:
-        try:
-            repaired = llm_repair_sql(sql, "Missing columns: " + ", ".join(sorted(set(missing))), manifest)
-            repaired = normalize_time_literals(clean_sql_output(repaired)) or sql
-            ok2, _ = validate_sql_columns(repaired,
-                                          SCHEMA_CONFIG["inventory"]["columns"],
-                                          SCHEMA_CONFIG["orders"]["columns"],
-                                          SCHEMA_CONFIG["mg"]["columns"])
-            if ok2:
-                sql = repaired
-        except Exception:
-            pass  # keep original sql or fall through
-
+# -----------------------------------------------------------------------------
+# Web flow (Wikipedia + Groq)
+# -----------------------------------------------------------------------------
+def fetch_wikipedia_snippet(q: str) -> str:
     try:
-        df = run_sql(sql, inv, ords, mg)
+        # Very small helper; not guaranteed to find a page for every query.
+        term = q.strip().split("\n")[0][:150]
+        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(term)}"
+        r = requests.get(url, timeout=6)
+        if r.ok:
+            data = r.json()
+            extract = data.get("extract") or ""
+            return extract
+    except Exception as e:
+        logging.info("wiki fetch failed: %s", e)
+    return ""
+
+def run_web_flow(q: str) -> Dict:
+    snippet = fetch_wikipedia_snippet(q)
+    if GROQ_API_KEY:
+        # Let Groq compose a concise answer with the snippet (if any)
+        context = f"Wikipedia says: {snippet}" if snippet else "No web snippet available."
+        msg = [
+            {"role": "system", "content": "Be concise and factual. If you have a snippet, ground your answer in it."},
+            {"role": "user", "content": f"Question: {q}\n\nContext: {context}\n\nAnswer briefly:"},
+        ]
+        try:
+            answer = llm_chat(msg, temperature=0.2)
+            return {"ok": True, "mode": "web", "reply": answer}
+        except Exception as e:
+            logging.info("Groq web answer failed: %s", e)
+    # Fallback
+    return {"ok": True, "mode": "web", "reply": snippet or "I couldn't fetch a web snippet, but I can still help analyze your data."}
+
+# -----------------------------------------------------------------------------
+# Data flow (Groq → SQL → DuckDB)
+# -----------------------------------------------------------------------------
+def run_data_flow(question: str, analysis_style: bool = False) -> Dict:
+    global last_result_df, last_result_sql, last_result_query
+    inv, ords, mg = load_data_for_routes()
+
+    schema = build_schema_description(inv, ords, mg)
+    if not GROQ_API_KEY:
+        # No Groq: naive fallback for demo safety
+        sql = "SELECT * FROM orders LIMIT 50"
+        try:
+            df = execute_sql(sql, inv, ords, mg)
+        except Exception:
+            df = pd.DataFrame()
+        last_result_df, last_result_sql, last_result_query = df, sql, question
+        return {
+            "reply": f"(fallback) Showing first {len(df)} rows from orders.",
+            "sql": sql,
+            "preview": trim_text(df_preview_string(df), 2000),
+        }
+
+    # 1) Ask Groq for SQL
+    sql_ask = sql_generation_prompt(question, schema, analysis_style=analysis_style)
+    try:
+        sql_text = llm_chat(sql_ask, temperature=0.0)
+    except Exception as e:
+        return {"reply": f"SQL generation error: {e}", "sql": None, "preview": None}
+
+    sql = extract_sql(sql_text)
+    # 2) Execute; if error → ask Groq to repair once
+    try:
+        df = execute_sql(sql, inv, ords, mg)
     except Exception as ex:
-        # final fallback: simple safe default
-        logging.exception("SQL execution failed; falling back to default")
-        df = run_sql(default_orders_sql(), inv, ords, mg)
-        sql = default_orders_sql()
-
-    if df.empty:
-        return {"reply": "No matching data found for your request.", "sql": sql, "preview": None}
-
-    preview_rows = 50 if len(df) > 50 else len(df)
-    preview = df.head(preview_rows).to_string(index=False)
-    reply_text = f"{preview}\n\n(Showing first {preview_rows} of {len(df)} rows)" if len(df) > 50 else preview
-    return {"reply": reply_text, "sql": sql, "preview": preview}
-
-# === Analysis chat (narrative, no table dumps) ==========================
-def _fmt_num(x):
-    import math
-    try:
-        if x is None: return "-"
-        if isinstance(x, float) and (math.isnan(x) or math.isinf(x)): return "-"
-        if isinstance(x, int): return f"{x:,}"
-        if isinstance(x, float): return f"{x:,.2f}"
-        # try numeric cast
-        xv = float(x)
-        return f"{xv:,.2f}"
-    except Exception:
-        return str(x)
-
-def _pct(a, b):
-    try:
-        if b in (0, None): return None
-        return (a / b) * 100.0
-    except Exception:
-        return None
-
-def _bulletize(lines):
-    lines = [str(s) for s in lines if s is not None and str(s).strip()]
-    return "Insights:\n" + "\n".join(f"- {s}" for s in lines) if lines else "No obvious insights found."
-
-def _orders_insights(ords: pd.DataFrame):
-    lines = []
-    if not isinstance(ords, pd.DataFrame) or ords.empty:
-        return ["No orders found."]
-
-    total_orders = int(ords.shape[0])
-    lines.append(f"Total orders: {_fmt_num(total_orders)}")
-
-    if "user_id" in ords:
-        uniq = int(ords["user_id"].dropna().nunique())
-        lines.append(f"Unique customers: {_fmt_num(uniq)}")
-
-    if "sale_price" in ords:
-        aov = float(ords["sale_price"].mean())
-        lines.append(f"AOV (mean sale_price): {_fmt_num(aov)}")
-
-    # simple weekly trend if created_at exists
-    if "created_at" in ords:
-        d = ords[["created_at"]].copy()
-        d["created_at"] = pd.to_datetime(d["created_at"], errors="coerce")
-        d = d.dropna()
-        if not d.empty:
-            w = d.set_index("created_at").resample("W").size()
-            if len(w) >= 2 and w.iloc[-2] != 0:
-                delta = ((w.iloc[-1] - w.iloc[-2]) / w.iloc[-2]) * 100
-                lines.append(f"Weekly order volume change (last vs prev): {delta:+.1f}%")
-
-    # status mix if present
-    if "status" in ords:
-        vc = ords["status"].astype(str).value_counts().head(3)
-        if not vc.empty:
-            mix = ", ".join(f"{k}: {_fmt_num(int(v))}" for k, v in vc.items())
-            lines.append(f"Top statuses: {mix}")
-
-    return lines
-
-def _mg_insights(mg: pd.DataFrame):
-    lines = []
-    if not isinstance(mg, pd.DataFrame) or mg.empty:
-        return ["MG dataset appears empty."]
-
-    # core KPIs
-    if "id_user" in mg:
-        total_da = int(mg["id_user"].dropna().nunique())
-        lines.append(f"Total DAs (unique id_user): {_fmt_num(total_da)}")
-
-    if "mg_eligible" in mg:
-        elig_rate = float(pd.to_numeric(mg["mg_eligible"], errors="coerce").mean()) * 100.0
-        lines.append(f"MG eligibility rate: {elig_rate:.1f}%")
-
-    if "total_payout" in mg:
-        total_payout = float(pd.to_numeric(mg["total_payout"], errors="coerce").sum())
-        lines.append(f"Total payout: {_fmt_num(total_payout)}")
-
-    if "rate" in mg:
-        avg_rate = float(pd.to_numeric(mg["rate"], errors="coerce").mean())
-        lines.append(f"Average rate: {_fmt_num(avg_rate)}")
-
-    # breakdowns
-    if {"city", "total_payout"}.issubset(mg.columns):
-        by_city = (pd.to_numeric(mg["total_payout"], errors="coerce")
-                   .groupby(mg["city"]).sum().sort_values(ascending=False).head(3))
-        if not by_city.empty:
-            s = ", ".join(f"{idx}: {_fmt_num(val)}" for idx, val in by_city.items())
-            lines.append(f"Top cities by payout: {s}")
-
-    if {"vendor_name", "total_payout"}.issubset(mg.columns):
-        by_vendor = (pd.to_numeric(mg["total_payout"], errors="coerce")
-                     .groupby(mg["vendor_name"]).sum().sort_values(ascending=False).head(3))
-        if not by_vendor.empty:
-            s = ", ".join(f"{idx}: {_fmt_num(val)}" for idx, val in by_vendor.items())
-            lines.append(f"Top vendors by payout: {s}")
-
-    # red flags: high penalties, low attendance vs PA
-    if "fnd_ndr_penalty_amount" in mg:
-        top_pen = (pd.to_numeric(mg["fnd_ndr_penalty_amount"], errors="coerce")
-                   .fillna(0).sort_values(ascending=False).head(3))
-        if top_pen.notna().any() and top_pen.sum() > 0:
-            lines.append(f"Highest FND/NDR penalties (top 3 sum): {_fmt_num(float(top_pen.sum()))}")
-
-    if {"attendance", "perfect_attendance"}.issubset(mg.columns):
-        mis = mg[(pd.to_numeric(mg["attendance"], errors="coerce") <
-                  pd.to_numeric(mg["perfect_attendance"], errors="coerce") - 3)]
-        if isinstance(mis, pd.DataFrame) and not mis.empty:
-            lines.append(f"Attendance shortfalls (>3 days under PA): {_fmt_num(int(mis.shape[0]))}")
-
-    return lines
-
-def _inventory_insights(inv: pd.DataFrame, ords: pd.DataFrame):
-    lines = []
-    if not isinstance(inv, pd.DataFrame) or inv.empty:
-        return ["Inventory dataset appears empty."]
-
-    total_items = int(inv.shape[0])
-    lines.append(f"Inventory rows: {_fmt_num(total_items)}")
-
-    if "product_id" in inv:
-        sku_count = int(inv["product_id"].dropna().nunique())
-        lines.append(f"Distinct SKUs: {_fmt_num(sku_count)}")
-
-    # on-hand as 'sold_at is NULL'
-    if "sold_at" in inv:
-        on_hand = int(inv["sold_at"].isna().sum())
-        lines.append(f"Current on-hand (sold_at NULL): {_fmt_num(on_hand)}")
-
-    # simple velocity by joining to orders if possible
-    if {"product_id"}.issubset(inv.columns) and {"product_id", "created_at"}.issubset(ords.columns):
-        o = ords[["product_id", "created_at"]].dropna().copy()
-        o["created_at"] = pd.to_datetime(o["created_at"], errors="coerce")
-        o = o.dropna()
-        if not o.empty:
-            last30 = o[o["created_at"] >= (o["created_at"].max() - pd.Timedelta(days=30))]
-            vel = (last30.groupby("product_id").size().rename("d30_sold"))
-            if not vel.empty:
-                lines.append(f"Products sold in the last 30 days: {_fmt_num(int((vel>0).sum()))}")
-    return lines
-
-def run_analysis_chat_flow(user_query: str) -> dict:
-    """Return a plain-text narrative in 'reply' (no table dumps)."""
-    inv, ords, mg = load_data_for_routes()
-    ql = (user_query or "").lower()
-
-    if any(k in ql for k in ("mg", "minimum guarantee", "minimum_guarantee")):
-        bullets = _mg_insights(mg)
-        text = _bulletize(bullets)
-        return {"reply": text, "sql": None, "preview": None}
-
-    if any(k in ql for k in ("inventory", "stock", "stockout", "stock out", "reorder")):
-        bullets = _inventory_insights(inv, ords)
-        text = _bulletize(bullets)
-        return {"reply": text, "sql": None, "preview": None}
-
-    # default: orders
-    bullets = _orders_insights(ords)
-    text = _bulletize(bullets)
-    return {"reply": text, "sql": None, "preview": None}
-    
-# ============ Info (web) ============
-INFO_SYSTEM_PROMPT = """
-You are SAGE-Info, an information expert.
-Provide a comprehensive, well-structured, neutral explanation for the user's question.
-Include when relevant: definition/overview, key concepts, step-by-step examples, caveats/trade-offs, and practical tips.
-Avoid auditspeak. Be thorough but clear.
-"""
-
-def fetch_online_answer(query: str, max_tokens: int = 900) -> str:
-    client = get_groq_client()
-    if client:
+        repair_ask = sql_repair_prompt(question, schema, sql, str(ex))
         try:
-            msgs = [{"role":"system","content":INFO_SYSTEM_PROMPT},{"role":"user","content":query}]
-            resp = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.2, max_tokens=max_tokens)
-            return resp.choices[0].message.content.strip()
-        except Exception:
-            logging.exception("LLM web answer failed; falling back to Wikipedia")
-    # Fallback: quick Wikipedia
-    try:
-        r = requests.get("https://en.wikipedia.org/w/api.php",
-                         params={"action":"opensearch","search":query,"limit":1,"namespace":0,"format":"json"},
-                         timeout=6)
-        arr = r.json()
-        if len(arr) >= 4 and arr[1]:
-            title = arr[1][0]
-            r2 = requests.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}", timeout=6)
-            js = r2.json(); text = (js.get("extract") or "").strip()
-            if text: return text[:1400]
-    except Exception:
-        logging.exception("Wikipedia fallback failed")
-    return "I couldn’t fetch an online answer right now."
+            repaired = llm_chat(repair_ask, temperature=0.0)
+            sql = extract_sql(repaired)
+            df = execute_sql(sql, inv, ords, mg)
+        except Exception as ex2:
+            return {"reply": f"SQL failed: {ex2}", "sql": sql, "preview": None}
 
-# ============ Routes ============
+    last_result_df, last_result_sql, last_result_query = df, sql, question
+    return {
+        "reply": f"Executed SQL. Showing first {min(50, len(df))} rows.",
+        "sql": sql,
+        "preview": trim_text(df_preview_string(df), 2000),
+    }
+
+# -----------------------------------------------------------------------------
+# Analysis flow (Groq → analysis SQL → answer from rows)
+# -----------------------------------------------------------------------------
+def run_analysis_flow(user_query: str) -> Dict:
+    """
+    Uses Groq to:
+      1) generate analysis-oriented SQL (aggregations / group-bys) and run it,
+      2) answer the user's question *directly from the result rows*.
+    """
+    global last_result_df, last_result_sql, last_result_query
+
+    wants_reuse = any(p in (user_query or "").lower() for p in REUSE_PHRASES)
+
+    # Step 1: get a dataset (reuse previous result if asked)
+    if wants_reuse and last_result_df is not None:
+        df = last_result_df.copy()
+        sql_used = last_result_sql or "(previous result)"
+    else:
+        data_res = run_data_flow(user_query, analysis_style=True)
+        if not data_res.get("preview"):
+            # Bubble up any error/notice from data flow
+            return data_res
+        df = last_result_df.copy()
+        sql_used = last_result_sql
+
+    # Single-cell answer? return directly.
+    try:
+        if isinstance(df, pd.DataFrame) and df.shape == (1, 1):
+            val = df.iloc[0, 0]
+            return {
+                "reply": f"Answer: {val}\n\n(derived from: {sql_used})",
+                "sql": sql_used,
+                "preview": trim_text(df_preview_string(df), 2000),
+            }
+    except Exception:
+        pass
+
+    # Step 2: Ask Groq to compose the *answer* from the actual rows
+    if not GROQ_API_KEY:
+        # No Groq: simple fallback narrative
+        return {
+            "reply": "Analysis fallback (no Groq). See the previewed rows and compute the metric you asked.",
+            "sql": sql_used,
+            "preview": trim_text(df_preview_string(df), 2000),
+        }
+
+    summary = pre_analyze(df)
+    csv_head = df_as_csv_snippet(df)
+    answer_msgs = build_answer_prompt(user_query, summary, csv_head)
+
+    try:
+        answer = llm_chat(answer_msgs, temperature=0.0)
+        return {
+            "reply": answer,
+            "sql": sql_used,
+            "preview": trim_text(df_preview_string(df), 2000),
+        }
+    except Exception as ex:
+        logging.info("Groq analysis answer failed: %s", ex)
+        return {
+            "reply": f"Analysis error. Here are the rows derived from: {sql_used}",
+            "sql": sql_used,
+            "preview": trim_text(df_preview_string(df), 2000),
+        }
+
+# -----------------------------------------------------------------------------
+# Routes
+# -----------------------------------------------------------------------------
 @app.get("/")
 def index():
-    tpl = (BASE_DIR / "templates" / "index.html")
-    if tpl.exists(): return render_template("index.html")
-    f = BASE_DIR / "index.html"
-    return f.read_text(encoding="utf-8") if f.exists() else "<h1>Noon AI</h1>"
+    return render_template("index.html")
 
-@app.get("/diagz")
-def diagz():
-    here = Path(__file__).resolve().parent
-    files = sorted([p.name for p in here.glob("*")])
-    return safe_json({"cwd": str(here), "files": files})
-
-@app.get("/healthz")
-def healthz():
-    try:
-        inv, ords, mg, meta = load_data()  # uses the robust reader above
-        shapes = {
-            "inventory": list(inv.shape) if isinstance(inv, pd.DataFrame) else None,
-            "orders":    list(ords.shape) if isinstance(ords, pd.DataFrame) else None,
-            "mg":        list(mg.shape)  if isinstance(mg,  pd.DataFrame) else None,
-        }
-        ok = all(shapes.get(k) for k in ("orders", "inventory"))  # mg can be legitimately missing
-        return safe_json({
-            "ok": ok,
-            "shapes": shapes,
-            "meta": meta
-        }, 200 if ok else 500)
-    except Exception as e:
-        logging.exception("/healthz failed")
-        # Return a terse but informative JSON error (no HTML)
-        return safe_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
-
-@app.post("/run_step")
-def run_step():
-    body = request.get_json(silent=True) or {}
-    step = (body.get("step") or "").lower().strip()
-    project = (body.get("project") or "Inventory Management").strip()
-    if not step:
-        return safe_json({"ok": False, "error": "Missing 'step'."}, 400)
-    # Keep your current audit-generation flow short & simple for now
-    reply = f"Ran step '{step}' for project '{project}'."
-    return safe_json({"ok": True, "reply": reply, "sql": None, "preview": None, "mode": "web"})
+@app.get("/health")
+def health():
+    return "ok", 200
 
 @app.post("/ask")
 def ask():
-    body = request.get_json(silent=True) or {}
-    user_query = (body.get("query") or "").strip()
-    mode = (body.get("mode") or "data").lower()
-    if not user_query:
-        return safe_json({"ok": True, "reply": "Please enter a question."})
-    if user_query.lower() in {"new chat","/new","reset"}:
-        return safe_json({"ok": True, "reply": "Started a new chat."})
+    payload = request.get_json(force=True) or {}
+    q = (payload.get("q") or payload.get("query") or "").strip()
+    mode = (payload.get("mode") or "web").lower()
 
-    # Quick intent that must always work
-    if mode in ("data","analysis") and "total customer" in user_query.lower():
-        inv, ords, mg = load_data_for_routes()
-        count = int(ords["user_id"].dropna().nunique())
-        return safe_json({"ok": True, "reply": f"Total distinct customers: {count}", "sql": None})
+    if not q:
+        return safe_json({"ok": True, "mode": mode, "reply": "Please type a question."})
 
-    try:
-        if mode == "data":
-            res = run_data_flow(user_query, analysis_style=False)
-        elif mode == "analysis":
-            # NEW: narrative insights instead of table dumps
-            res = run_analysis_chat_flow(user_query)
-        elif mode == "web":
-            return safe_json({"ok": True, "reply": fetch_online_answer(user_query), "sql": None, "preview": None, "mode": "web"})
-        else:
-            res = run_data_flow(user_query, analysis_style=False)
-            res["reply"] = f"(demo) Unknown mode '{mode}'. Defaulted to Data.\n\n{res['reply']}"
-        return safe_json({"ok": True, "reply": res.get("reply",""), "sql": res.get("sql"), "preview": res.get("preview"), "mode": mode})
-    except Exception as e:
-        logging.exception("ask failed")
-        return safe_json({"ok": False, "error": str(e)}, 500)
+    if mode == "analysis":
+        res = run_analysis_flow(q)
+        return safe_json(res)
 
-# ============ Entrypoint ============
+    if mode == "data":
+        res = run_data_flow(q, analysis_style=False)
+        return safe_json(res)
+
+    # default: web
+    res = run_web_flow(q)
+    return safe_json(res)
+
+# -----------------------------------------------------------------------------
+# Local dev
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # pip install flask pandas numpy duckdb python-dotenv groq requests
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
