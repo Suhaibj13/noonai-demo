@@ -38,7 +38,7 @@ def _fix_nans(obj):
 def safe_json(data, status=200):
     return jsonify(_fix_nans(data)), status
 
-API_PATHS = {"/ask", "/run_step", "/healthz"}
+API_PATHS = {"/", "/run_step", "/healthz"}
 
 def _wants_json() -> bool:
     try:
@@ -629,8 +629,19 @@ def run_step():
     reply = f"Ran step '{step}' for project '{project}'."
     return safe_json({"ok": True, "reply": reply, "sql": None, "preview": None, "mode": "web"})
 
-@app.post("/ask")
+@app.post("/ask", methods=["POST"])
 def ask():
+    payload = request.get_json(force=True) or {}
+    q = (payload.get("q") or "").strip()
+    mode = (payload.get("mode") or "web").lower()
+    datasets = payload.get("datasets") or []
+    file_hints = payload.get("fileHints") or []
+
+    # ===== APPEND (new analysis branch) =====
+    if mode == "analysis":
+        result = run_analysis_router(q, datasets=datasets, file_hints=file_hints)
+        return jsonify(result), 200
+        
     body = request.get_json(silent=True) or {}
     user_query = (body.get("query") or "").strip()
     mode = (body.get("mode") or "data").lower()
