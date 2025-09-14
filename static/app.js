@@ -159,7 +159,7 @@ async function sendQuery(userText) {
   try {
     const res = await fetch("/ask", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json","Accept": "application/json" },
       body: JSON.stringify(payload)
     });
 
