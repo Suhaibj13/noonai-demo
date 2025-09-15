@@ -217,6 +217,62 @@ def run_web_flow(q: str) -> Dict:
             logging.info("Groq web answer failed: %s", e)
     return {"ok": True, "mode": "web", "reply": snippet or "I couldn't fetch a web snippet, but I can analyze your data."}
 
+# ---------- Column typing helpers (APPEND) ----------
+from pandas.api.types import (
+    is_numeric_dtype,
+    is_datetime64_any_dtype,
+    is_bool_dtype,
+)
+
+def _simple_dtype(series: pd.Series) -> str:
+    try:
+        if is_datetime64_any_dtype(series):
+            return "datetime"
+        if is_bool_dtype(series):
+            return "numeric"  # counts as 0/1 for our simple taxonomy
+        if is_numeric_dtype(series):
+            return "numeric"
+        # heuristic: try a quick datetime parse on small sample
+        if "date" in series.name.lower() or "time" in series.name.lower():
+            try:
+                pd.to_datetime(series.sample(min(50, len(series))), errors="raise")
+                return "datetime"
+            except Exception:
+                pass
+        return "string"
+    except Exception:
+        return "string"
+
+def _get_dataset_frame(name: str) -> Tuple[str, pd.DataFrame]:
+    """Map UI label -> dataframe. Returns canonical key and df."""
+    inv, ords, mg = load_data_for_routes()
+    key = name.strip().lower()
+    if key in ("order", "orders"):
+        return "orders", ords
+    if key in ("inventory", "inventory management", "inventory_management"):
+        return "inventory", inv
+    if key in ("minimum guarantee", "mg", "minimum_guarantee"):
+        return "mg", mg
+    # fallback guess
+    return key, pd.DataFrame()
+
+# ---------- New endpoint: /schema (APPEND) ----------
+@app.get("/schema")
+def get_schema():
+    """
+    Returns a simple schema for the requested dataset:
+    { dataset: "<key>", columns: [{name, type}] }
+    """
+    dataset = (request.args.get("dataset") or "").strip()
+    if not dataset:
+        return safe_json({"ok": False, "error": "Missing dataset param"}, 400)
+
+    key, df = _get_dataset_frame(dataset)
+    if df is None or df.empty:
+        return safe_json({"ok": False, "dataset": key, "error": "Dataset not found or empty."}, 404)
+
+    cols = [{"name": c, "type": _simple_dtype(df[c])} for c in df.columns]
+    return safe_json({"ok": True, "dataset": key, "columns": cols})
 # -----------------------------------------------------------------------------
 # Data flow (Groq → SQL → DuckDB, with column guard & repair)
 # -----------------------------------------------------------------------------
