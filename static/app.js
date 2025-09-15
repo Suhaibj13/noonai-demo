@@ -1,174 +1,232 @@
-/* static/app.js — stable bubbles + processing + Data→Extract schema viewer */
-
-(function () {
-  // ---------- helpers ----------
-  const $  = (sel, root=document) => root.querySelector(sel);
-  const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
-  const safe = (s) => (s == null ? "" : String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"));
-
-  // ---------- DOM ----------
-  const el = {
-    messages: $("#messages") || document.body,
-    input: $("#input") || $("textarea") || $('input[type="text"]'),
-    send: $("#send") || $("#sendBtn"),
-    reset: $("#reset-btn") || $("#reset") || $("#resetBtn"),
-    modeBadge: $("#mode"),
-    status: $("#status"),
-    modeBtns: $$('.mode-btn[data-mode]'),
-    dataSelector: $("#data-selector"),
-    extractBtn: $("#extractBtn"),
+// ===== SAGE Frontend – final scroll + logo-safe settings (fixed JSON handling) =====
+// --- safety: define fetchJson if the helper file didn't load ---
+if (!window.fetchJson) {
+  window.fetchJson = async function fetchJson(input, init) {
+    const res = await fetch(input, init);
+    const text = await res.text();
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    const isJson = ct.includes("application/json");
+    if (!res.ok || !isJson) {
+      const snippet = text.slice(0, 300);
+      throw new Error(`HTTP ${res.status} ${res.statusText} — Not JSON\n${snippet}`);
+    }
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error(`JSON parse error: ${e.message}\nSnippet: ${text.slice(0, 300)}`);
+    }
   };
+}
 
-  // ---------- state ----------
-  let currentMode = "web"; // "web" | "data" | "analysis"
+const $ = (sel) => document.querySelector(sel);
+const messagesEl = $("#messages");
+const inputEl = $("#input");
+const sendBtn = $("#send");
+const statusEl = $("#status");
+const modeLabelEl = $("#mode");
+const resetBtn = $("#reset-btn");
 
-  // ---------- status / mode badges ----------
-  function setStatus(text){ if (el.status) el.status.textContent = text; }
-  function setModeBadge(mode){
-    if (el.modeBadge) el.modeBadge.textContent = `Mode: ${mode[0].toUpperCase()}${mode.slice(1)}`;
+const state = { sending: false, mode: "web", history: [] };
+
+// Mode switching
+function setMode(newMode){
+  state.mode = newMode;
+  document.querySelectorAll(".mode-btn").forEach(btn => {
+    const active = btn.dataset.mode === newMode;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
+  });
+  const placeholders = {
+    data: "Data mode: ask for rows/filters/joins/aggregates over your tables…",
+    analysis: "Analysis mode: ask for insights, trends, segments, anomalies…",
+    web: "Web mode: quick factual answers (type 'observations' to get O/R/R)…"
+  };
+  inputEl.placeholder = placeholders[newMode] || "Type your question…";
+  if (modeLabelEl) modeLabelEl.textContent = `Mode: ${newMode[0].toUpperCase()}${newMode.slice(1)}`;
+}
+
+// Chat helpers
+function addMessage(role, content){
+  state.history.push({ role, content });
+  const wrap = document.createElement("div");
+  wrap.className = `msg ${role === "user" ? "msg-user" : "msg-ai"}`;
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = content;
+  wrap.appendChild(bubble);
+  messagesEl.appendChild(wrap);
+  scroller().scrollTop = scroller().scrollHeight;
+}
+
+function addTyping(){
+  const wrap = document.createElement("div");
+  wrap.className = "msg msg-ai";
+  wrap.id = "typing";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.innerHTML = `<span class="typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`;
+  wrap.appendChild(bubble);
+  messagesEl.appendChild(wrap);
+  scroller().scrollTop = scroller().scrollHeight;
+}
+function removeTyping(){ document.getElementById("typing")?.remove(); }
+
+function scroller() {
+  return document.querySelector(".chat");
+}
+
+// Ensure chat area never hides under composer
+function updateComposerOffset(){
+  const comp = document.querySelector(".composer");
+  const px = comp ? comp.offsetHeight + 24 : 160;
+  document.documentElement.style.setProperty("--composer-offset", px + "px");
+  scroller().scrollTop = scroller().scrollHeight;
+}
+
+// Send handler (uses /ask)
+async function send(){
+  const q = (inputEl.value || "").trim();
+  if (!q || state.sending) return;
+
+  addMessage("user", q);
+  inputEl.value = "";
+  inputEl.style.height = "auto";
+  sendBtn.disabled = true;
+  state.sending = true;
+  if (statusEl) statusEl.textContent = "Processing…";
+  addTyping();
+
+  try{
+    const data = await window.fetchJson("/ask", {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "Accept":"application/json" },
+      body: JSON.stringify({ query: q, mode: state.mode })
+    });
+    removeTyping();
+    addMessage("ai", String((data.reply ?? "(no reply)")).trim());
+    if (statusEl) statusEl.textContent = "Ready";
+  } catch(e){
+    removeTyping();
+    addMessage("ai", `Error: ${e.message}`);
+    if (statusEl) statusEl.textContent = "Error";
+  } finally{
+    state.sending = false;
+    sendBtn.disabled = false;
+    scroller().scrollTop = scroller().scrollHeight;
   }
+}
 
-  // ---------- bubble rendering ----------
-  function addBubble(role, innerHTML){
-    const wrap = document.createElement("div");
-    wrap.className = role === "user" ? "msg msg-user" : "msg msg-ai";
-    const bubble = document.createElement("div");
-    bubble.className = "bubble";
-    bubble.innerHTML = innerHTML;
-    wrap.appendChild(bubble);
-    el.messages.appendChild(wrap);
-    el.messages.scrollTop = el.messages.scrollHeight;
-    return bubble; // in case caller needs id
+// Reset conversation (posts "reset" via /ask)
+async function resetConversation(){
+  messagesEl.innerHTML = "";
+  try{
+    const data = await window.fetchJson("/ask", {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "Accept":"application/json" },
+      body: JSON.stringify({ query: "reset", mode: state.mode })
+    });
+    addMessage("ai", String((data?.reply ?? "Started a new chat.")).trim());
+  }catch(_){
+    addMessage("ai", "Started a new chat.");
   }
+  inputEl.focus();
+}
 
-  function addUser(html){ addBubble("user", html); }
+// Events
+sendBtn.addEventListener("click", send);
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
+});
+inputEl.addEventListener("input", () => {
+  inputEl.style.height = "auto";
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
+  updateComposerOffset();
+});
+resetBtn.addEventListener("click", resetConversation);
+document.querySelectorAll(".mode-btn").forEach(btn =>
+  btn.addEventListener("click", () => setMode(btn.dataset.mode))
+);
 
-  function addAI(html){ addBubble("ai", html); }
+window.addEventListener("load", () => { setMode(state.mode); updateComposerOffset(); });
+window.addEventListener("resize", updateComposerOffset);
 
-  function typingOn(){
-    const id = `typing-${Date.now()}`;
-    const b = addBubble("ai",
-      `<span id="${id}" class="typing">
-         <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-       </span>`);
-    return id;
-  }
+// --- Audit Steps wiring ---
+const projectSel = document.querySelector("#project");
 
-  function typingOff(id){
-    const node = document.getElementById(id);
-    if (!node) return;
-    const wrap = node.closest(".msg");
-    if (wrap && wrap.parentNode) wrap.parentNode.removeChild(wrap);
-    else node.remove();
-  }
+document.querySelectorAll("#audit-steps .rail-btn[data-step]").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const step = (btn.dataset.step || "").trim(); // rcm | data_request | findings | report
+    if (!step) return;
 
-  // ---------- render server responses ----------
-  function renderResponse(resp){
-    if (!resp){ addAI("<em>No response</em>"); return; }
+    const project = projectSel ? projectSel.value : "Inventory Management";
+    addMessage("user", `Run "${step}" for project: ${project}`);
+    if (statusEl) statusEl.textContent = `Running ${step}…`;
+    addTyping();
 
-    if (typeof resp.reply === "string" && resp.reply.trim()){
-      addAI(`<p>${safe(resp.reply)}</p>`);
-    }
-    if (resp.sql){
-      addAI(`<pre class="sql">${safe(resp.sql)}</pre>`);
-    }
-    if (resp.preview && typeof resp.preview === "string"){
-      addAI(`<pre class="preview">${safe(resp.preview)}</pre>`);
-    }
-    if (!resp.reply && !resp.sql && !resp.preview){
-      addAI(`<pre class="json">${safe(JSON.stringify(resp, null, 2))}</pre>`);
-    }
-  }
-
-  // ---------- send flow ----------
-  async function sendQuery(text){
-    const q = (text ?? (el.input ? el.input.value : "")).trim();
-    if (!q) return;
-
-    addUser(`<p>${safe(q)}</p>`);
-    if (el.input) el.input.value = "";
-    const tId = typingOn(); setStatus("Processing…");
-
-    try{
-      const res = await fetch("/ask", {
+    try {
+      const data = await window.fetchJson("/run_step", {
         method: "POST",
         headers: { "Content-Type":"application/json", "Accept":"application/json" },
-        body: JSON.stringify({ q, mode: currentMode })
+        body: JSON.stringify({ step, project })
       });
-      const json = await res.json();
-      typingOff(tId); setStatus("Ready");
-      renderResponse(json);
-    }catch(err){
-      typingOff(tId); setStatus("Ready");
-      addAI(`<p style="color:#b00020">Error: ${safe(err.message || err)}</p>`);
+      removeTyping();
+      addMessage("ai", String((data.reply ?? "(no reply)")).trim());
+      if (statusEl) statusEl.textContent = "Ready";
+    } catch (e) {
+      removeTyping();
+      addMessage("ai", `Error: ${e.message}`);
+      if (statusEl) statusEl.textContent = "Error";
     }
+  });
+});
+
+// ===========================
+// Project-aware presets
+// ===========================
+function materializePrompt(tpl) {
+  const sel = document.querySelector("#project");
+  const project = sel ? sel.value : "Inventory Management";
+  const filled = (tpl || "").replaceAll("{project}", project);
+  if (filled === tpl) {
+    return `Project: ${project}. ${tpl}`;
   }
+  return filled;
+}
 
-  // ---------- schema: Data → Extract ----------
-  async function fetchSchemaAndRender(){
-    const dataset = el.dataSelector ? el.dataSelector.value : "orders";
-    const tId = typingOn(); setStatus("Extracting schema…");
+// === Auto-send for Audit buttons and chips ===
+document.querySelectorAll("[data-q]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const raw = btn.dataset.q;
+    if (!raw) return;
 
-    try{
-      const res = await fetch(`/schema?dataset=${encodeURIComponent(dataset)}`, {
-        headers: { "Accept":"application/json" }
-      });
-      const payload = await res.json();
-      typingOff(tId); setStatus("Ready");
+    const q = materializePrompt(raw);
 
-      if (!payload.ok){
-        addAI(`<p style="color:#b00020">Schema error: ${safe(payload.error || "Unknown error")}</p>`);
-        return;
-      }
-      const items = (payload.columns || []).map(c =>
-        `<li><strong>${safe(c.name)}</strong> - ${safe(c.type || "string")}</li>`
-      ).join("");
+    // show it as if the user typed it
+    addMessage("user", q);
+    inputEl.value = "";
+    sendBtn.disabled = true;
+    state.sending = true;
+    if (statusEl) statusEl.textContent = "Processing…";
+    addTyping();
 
-      addAI(`
-        <div>
-          <div class="insight-subtitle">Columns in <em>${safe(payload.dataset)}</em></div>
-          <ul>${items || "<li>(no columns)</li>"}</ul>
-        </div>
-      `);
-    }catch(err){
-      typingOff(tId); setStatus("Ready");
-      addAI(`<p style="color:#b00020">Schema error: ${safe(err.message || err)}</p>`);
-    }
-  }
-
-  // ---------- modes ----------
-  function setMode(m){
-    currentMode = m;
-    setModeBadge(m);
-    el.modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === m));
-  }
-
-  // ---------- wire events ----------
-  function init(){
-    // modes
-    el.modeBtns.forEach(btn => btn.addEventListener("click", () => setMode(btn.dataset.mode)));
-
-    // send
-    if (el.send) el.send.addEventListener("click", () => sendQuery());
-    if (el.input) el.input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); sendQuery(); }
+    window.fetchJson("/ask", {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "Accept":"application/json" },
+      body: JSON.stringify({ query: q, mode: state.mode })
+    })
+    .then((data) => {
+      removeTyping();
+      addMessage("ai", String((data.reply ?? "(no reply)")).trim());
+      if (statusEl) statusEl.textContent = "Ready";
+    })
+    .catch(e => {
+      removeTyping();
+      addMessage("ai", `Error: ${e.message}`);
+      if (statusEl) statusEl.textContent = "Error";
+    })
+    .finally(() => {
+      state.sending = false;
+      sendBtn.disabled = false;
     });
-
-    // reset
-    if (el.reset) el.reset.addEventListener("click", () => { el.messages.innerHTML = ""; });
-
-    // extract
-    if (el.extractBtn) el.extractBtn.addEventListener("click", (e) => {
-      e.preventDefault();
-      fetchSchemaAndRender();
-    });
-
-    // default
-    setMode("web");
-    setStatus("Ready");
-    console.log("[Noon AI] UI ready");
-  }
-
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
-  else init();
-})();
+  });
+});
