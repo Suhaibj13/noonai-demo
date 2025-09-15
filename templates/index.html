@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="en">
 <head>
@@ -63,19 +64,12 @@
         </div>
 
         <!-- Presets -->
-        <!-- REPLACE the old Presets block with this Data selector block -->
-        <div class="sidebar-section">
-          <div class="section-title">Data</div>
-          <div class="stack">
-            <select id="data-selector" class="input">
-              <option value="orders">Order</option>
-              <option value="inventory">Inventory Management</option>
-              <option value="mg">Minimum Guarantee</option>
-            </select>
-            <button id="extractBtn" class="btn">Extract</button>
-          </div>
-          <div id="schema-hint" class="muted" style="margin-top:6px">
-            Select a dataset and click Extract to list columns &amp; types.
+        <div class="rail-section">
+          <h4>Presets</h4>
+          <div class="rail-chips">
+            <button class="chip" data-q="Start Marketing Audit for {project} (scope: CAC, retention, ROI). Ask me for the CSV to begin.">Marketing</button>
+            <button class="chip" data-q="Start DevOps Audit for {project} (non-technical overview). List the documentation and metrics we need from each team.">DevOps</button>
+            <button class="chip" data-q="Kick off {project} audit. Generate the RCM first, then a data request list.">Quick Start</button>
           </div>
         </div>
       </aside>
@@ -109,6 +103,7 @@
     </div>
   </div>
   <script src="{{ url_for('static', filename='fetchJson.js') }}"></script>
-  <script src="/static/app.js?v=21"></script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="/static/app.js?v=20"></script>
 </body>
 </html>
