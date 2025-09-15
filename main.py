@@ -328,39 +328,89 @@ def run_data_flow(question: str, analysis_style: bool = False, previous_sql: Opt
 # Analysis flow (Groq → analysis SQL → Groq answers from rows; carries follow-up context)
 # -----------------------------------------------------------------------------
 def run_analysis_flow(user_query: str) -> Dict:
+    """
+    Groq for analysis:
+      1) generate analysis SQL (aggregations / group-bys) and run it,
+      2) compose chat-style answer from the actual rows.
+    For single-cell results, we still call Groq to make it read naturally,
+    and we do NOT return the SQL in the payload.
+    """
     global last_result_df, last_result_sql, last_result_query
 
     ql = (user_query or "").lower()
     wants_reuse = any(p in ql for p in REUSE_PHRASES)
     prev_sql = last_result_sql if wants_reuse else None
 
-    # Step 1: get analysis-style dataset (use previous SQL if follow-up refers to "these/previous/above")
+    # Step 1: get analysis-style dataset (reuse previous SQL if follow-up refers to "these/previous/above")
     data_res = run_data_flow(user_query, analysis_style=True, previous_sql=prev_sql)
     if not data_res.get("preview"):
-        return data_res  # bubble up errors
+        return data_res  # bubble up errors from data flow
     df, sql_used = last_result_df.copy(), last_result_sql
 
-    # Single-cell? answer directly
+    # ---- Single-cell path: call Groq to make it conversational; omit SQL in response ----
     try:
-        if isinstance(df, pd.DataFrame) and df.shape == (1,1):
-            val = df.iloc[0,0]
-            return {"reply": f"Answer: {val}\n\n(derived from: {sql_used})", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
+        if isinstance(df, pd.DataFrame) and df.shape == (1, 1):
+            # Build a tiny CSV so the LLM has the actual value
+            csv_head = df_as_csv_snippet(df, max_rows=1, max_chars=200)
+            if GROQ_API_KEY:
+                prompt = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert analyst. Turn the single numeric result into a concise, "
+                            "human-friendly answer that directly addresses the user's question.\n"
+                            "- Start with 'Answer: ...' on the first line using the exact value.\n"
+                            "- Add 1–3 short supporting bullets (optional), e.g., brief context or implication.\n"
+                            "- Do NOT include SQL or code. Be precise and neutral."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"QUESTION: {user_query}\n\nRESULT (CSV):\n{csv_head}",
+                    },
+                ]
+                try:
+                    answer = llm_chat(prompt, temperature=0.0)
+                except Exception:
+                    # If Groq hiccups, fall back to the raw value
+                    answer = f"Answer: {df.iloc[0, 0]}"
+            else:
+                # No Groq key: deterministic fallback (still omitting SQL)
+                answer = f"Answer: {df.iloc[0, 0]}"
+
+            return {
+                "reply": answer,
+                "sql": None,  # <-- suppress query in UI per your request
+                "preview": trim_text(df_preview_string(df), 2000),
+            }
     except Exception:
+        # If anything odd happens, proceed to the general multi-row path below
         pass
 
-    # Step 2: ask Groq to compose the final answer from actual rows
+    # ---- Multi-row path (unchanged): ask Groq to compose from actual rows ----
     if not GROQ_API_KEY:
-        return {"reply":"Analysis fallback (no Groq). See preview and compute manually.", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
+        return {
+            "reply": "Analysis fallback (no Groq). See preview and compute manually.",
+            "sql": sql_used,
+            "preview": trim_text(df_preview_string(df), 2000),
+        }
 
-    summary  = pre_analyze(df)
+    summary = pre_analyze(df)
     csv_head = df_as_csv_snippet(df)
     try:
         answer = llm_chat(build_answer_prompt(user_query, summary, csv_head), temperature=0.0)
-        return {"reply": answer, "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
+        return {
+            "reply": answer,
+            "sql": sql_used,  # keep SQL for multi-row results as before
+            "preview": trim_text(df_preview_string(df), 2000),
+        }
     except Exception as ex:
         logging.info("Groq analysis answer failed: %s", ex)
-        return {"reply": f"Analysis error. Rows derived from: {sql_used}", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
-
+        return {
+            "reply": f"Analysis error. Rows derived from: {sql_used}",
+            "sql": sql_used,
+            "preview": trim_text(df_preview_string(df), 2000),
+        }
 # -----------------------------------------------------------------------------
 # /schema (for Data → Extract: list columns & simple types)
 # -----------------------------------------------------------------------------
