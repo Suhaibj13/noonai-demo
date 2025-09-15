@@ -227,9 +227,3 @@ button#send[disabled]{ opacity:.6; cursor:not-allowed }
 .sr-only{ position:absolute; left:-9999px; width:1px; height:1px; overflow:hidden }
 .project-select{ width:100%; background:rgba(0,0,0,.18); color:var(--text); border:1px solid var(--border); border-radius:10px; padding:8px 10px; font-size:14px }
 .small-muted{ color:var(--muted); font-size:12px }
-
-.schema-block { padding: 8px 10px; border-radius: 8px; background: rgba(0,0,0,.03); }
-.schema-cols { list-style: none; padding: 0; margin: 6px 0 0; }
-.schema-cols li { padding: 6px 4px; border-bottom: 1px solid rgba(0,0,0,.06); }
-.schema-name { font-weight: 600; }
-.schema-type { opacity: .75; margin-left: 6px; }
