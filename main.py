@@ -158,14 +158,32 @@ def sql_repair_prompt(question: str, schema_desc: str, bad_sql: str, error_msg: 
     usr = f"Schema:\n{schema_desc}\n\nQuestion: {question}\n\nBad SQL:\n{bad_sql}\n\nError:\n{error_msg}\n\nCorrected SQL:"
     return [{"role":"system","content":sys},{"role":"user","content":usr}]
 
-def build_answer_prompt(user_query: str, df_summary: dict, df_csv_head: str) -> List[Dict]:
+def build_answer_prompt(user_query: str, df_summary: dict, df_csv_head: str, column_names: Optional[List[str]] = None) -> List[Dict]:
+    """
+    Ask Groq to write a chat-style answer using ONLY the provided rows.
+    This avoids 'how to filter...' instructions and forces a direct, conversational reply.
+    """
+    cols_txt = ", ".join(column_names or [])
     sys = (
-        "You are an expert analyst. Use ONLY the provided result rows to answer the user's question precisely.\n"
-        "Start with 'Answer: ...' on the first line. Then add up to 5 short supporting bullets.\n"
-        "If the rows are insufficient, say exactly what data/filters are missing. No code blocks. No SQL."
+        "You are a helpful data analyst. Use ONLY the table of rows provided to answer the user's question.\n"
+        "STYLE:\n"
+        "- Conversational and concise, like ChatGPT.\n"
+        "- First line MUST start with: 'Answer: ...' giving the result directly.\n"
+        "- Then up to 3 short bullets with useful context (top contributors, quick ratios, brief takeaway).\n"
+        "DO NOT:\n"
+        "- Do not describe how to filter or what you would do.\n"
+        "- Do not restate column definitions, dataset size, or say 'data is available'.\n"
+        "- Do not include SQL, code, or markdown code fences.\n"
+        "IF INSUFFICIENT:\n"
+        "- If the rows are insufficient, say: 'Answer: I couldn't compute this from the provided rows' and name the specific missing columns needed.\n"
     )
-    usr = f"QUESTION: {user_query}\n\nDATA SUMMARY: {json.dumps(df_summary)}\n\nRESULT ROWS (CSV head):\n{df_csv_head}"
-    return [{"role":"system","content":sys},{"role":"user","content":usr}]
+    usr = (
+        f"QUESTION: {user_query}\n\n"
+        f"COLUMNS AVAILABLE: {cols_txt}\n\n"
+        f"DATA SUMMARY: {json.dumps(df_summary)}\n\n"
+        f"RESULT ROWS (CSV head):\n{df_csv_head}"
+    )
+    return [{"role": "system", "content": sys}, {"role": "user", "content": usr}]
 
 # -----------------------------------------------------------------------------
 # Column guard for MG (maps aliases → exact quoted MG column names)
@@ -381,11 +399,11 @@ def run_analysis_flow(user_query: str) -> Dict:
                     {
                         "role": "system",
                         "content": (
-                            "You are an expert analyst. Turn the single numeric result into a concise, "
+                            "You are a helpful data analyst. Turn the single numeric result into a concise, "
                             "human-friendly answer that directly addresses the user's question.\n"
-                            "- Start with 'Answer: ...' on the first line using the exact value.\n"
-                            "- Add 1–3 short supporting bullets (optional), e.g., brief context or implication.\n"
-                            "- Do NOT include SQL or code. Be precise and neutral."
+                            "- Start with 'Answer: ...' using the exact value.\n"
+                            "- Add 1–3 very short bullets with context (e.g., top driver, quick ratio, or implication) if relevant.\n"
+                            "- No SQL, no methodology, no code."
                         ),
                     },
                     {
@@ -419,10 +437,12 @@ def run_analysis_flow(user_query: str) -> Dict:
             "preview": trim_text(df_preview_string(df), 2000),
         }
 
-    summary = pre_analyze(df)
-    csv_head = df_as_csv_snippet(df)
+    summary   = pre_analyze(df)
+    csv_head  = df_as_csv_snippet(df)
+    col_names = list(df.columns)
+    
     try:
-        answer = llm_chat(build_answer_prompt(user_query, summary, csv_head), temperature=0.0)
+        answer = llm_chat(build_answer_prompt(user_query, summary, csv_head, col_names), temperature=0.2)
         return {
             "reply": answer,
             "sql": sql_used,  # keep SQL for multi-row results as before
