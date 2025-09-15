@@ -205,24 +205,48 @@ def build_mg_synonym_map(mg_df: pd.DataFrame) -> Dict[str, str]:
     return m
 
 def apply_mg_synonyms(sql: str, mg_df: pd.DataFrame) -> str:
-    """Rewrite identifiers to the exact MG column names (quoted) when mg is referenced."""
+    """
+    Rewrite identifiers to the exact MG column names (quoted) when mg is referenced.
+    Now handles:
+      - qualified tokens (mg.col)
+      - bare single-word tokens (col)
+      - multi-word / symbol columns like: Total Attendance, FND+NDR+penalty Amount
+        → mg."Total Attendance", mg."FND+NDR+penalty Amount"
+    """
     if not sql or mg_df is None or mg_df.empty:
         return sql
+    # Only attempt if the query references mg at all
     if not re.search(r"\bmg\b", sql, flags=re.I):
         return sql
 
     syn = build_mg_synonym_map(mg_df)
+    fixed = sql
 
-    # 1) rewrite mg.<identifier>
+    # (A) FIRST: handle multi-word / symbol-containing columns by direct phrase replacement
+    #     Replace unquoted occurrences with the exact quoted column name (optionally qualified).
+    multi_cols = [c for c in mg_df.columns if re.search(r"\W", c)]  # spaces or punctuation
+    for col in multi_cols:
+        col_esc = re.escape(col)
+
+        # mg.<phrase>  →  mg."<phrase>"
+        pat_qual = re.compile(rf'\bmg\s*\.\s*{col_esc}\b', flags=re.I)
+        fixed = pat_qual.sub(f'mg.{_quoted(col)}', fixed)
+
+        # bare <phrase> (not already quoted) →  "<phrase>"
+        # - negative look-behind and ahead to avoid already quoted instances
+        pat_bare = re.compile(rf'(?<!")\b{col_esc}\b(?!")', flags=re.I)
+        fixed = pat_bare.sub(_quoted(col), fixed)
+
+    # (B) THEN: mg.<identifier> (single-word identifiers)
     def repl_qualified(m: re.Match) -> str:
         ident = m.group(1)
         key = _norm(ident)
         rep = syn.get(key)
         return f'mg.{rep}' if rep else m.group(0)
 
-    fixed = re.sub(r'\bmg\.([A-Za-z_][A-Za-z0-9_]*)\b', repl_qualified, sql)
+    fixed = re.sub(r'\bmg\.([A-Za-z_][A-Za-z0-9_]*)\b', repl_qualified, fixed)
 
-    # 2) rewrite bare identifiers (avoid SQL keywords)
+    # (C) FINALLY: bare identifiers (single words), avoid SQL keywords
     def repl_bare(m: re.Match) -> str:
         ident = m.group(1)
         if ident.lower() in SQL_RESERVED:
