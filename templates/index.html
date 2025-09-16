@@ -63,16 +63,21 @@
           <div class="history"></div>
         </div>
 
-        <!-- Presets -->
-        <div class="rail-section">
-          <h4>Presets</h4>
-          <div class="rail-chips">
-            <button class="chip" data-q="Start Marketing Audit for {project} (scope: CAC, retention, ROI). Ask me for the CSV to begin.">Marketing</button>
-            <button class="chip" data-q="Start DevOps Audit for {project} (non-technical overview). List the documentation and metrics we need from each team.">DevOps</button>
-            <button class="chip" data-q="Kick off {project} audit. Generate the RCM first, then a data request list.">Quick Start</button>
+        <!-- Schema (replaces Presets) -->
+        <div class="sidebar-section">
+          <div class="section-title">Schema</div>
+          <div class="stack">
+            <select id="schema-selector" class="input">
+              <option value="orders">Orders</option>
+              <option value="inventory">Inventory</option>
+              <option value="mg">Minimum Guarantee</option>
+            </select>
+            <button id="schemaViewBtn" class="btn">View</button>
+          </div>
+          <div class="muted" style="margin-top:6px">
+            Select a dataset and click <b>View</b> to list columns &amp; types.
           </div>
         </div>
-      </aside>
 
       <main class="content">
         <!-- Scroller -->
