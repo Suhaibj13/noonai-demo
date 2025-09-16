@@ -9,6 +9,7 @@ import pandas as pd
 import requests
 from flask import Flask, jsonify, render_template, request
 from dotenv import load_dotenv
+from column_aliases import COLUMN_ALIASES
 from pandas.api.types import (
     is_numeric_dtype,
     is_datetime64_any_dtype,
@@ -198,29 +199,50 @@ def _norm(s: str) -> str:
 def _quoted(col: str) -> str:
     return f'"{col}"' if re.search(r"\W", col) else col
 
-def build_mg_synonym_map(mg_df: pd.DataFrame) -> Dict[str, str]:
-    m: Dict[str, str] = {}
-    for col in mg_df.columns:
+def generate_alias_map(df: pd.DataFrame, dataset_key: str) -> Dict[str, str]:
+    """
+    For a dataframe + dataset key ('mg' | 'orders' | 'inventory'), produce a map:
+      normalized_alias -> exact QUOTED column name
+    Includes automatic variants (snake/spaceless/lower) + curated COLUMN_ALIASES.
+    """
+    curated = COLUMN_ALIASES.get(dataset_key, {})
+    amap: Dict[str, str] = {}
+
+    for col in df.columns:
         q = _quoted(col)
         lc = col.lower()
-        keys = {
+
+        # automatic variants for the actual column name
+        auto = {
             _norm(col),
             lc,
             lc.replace(" ", "_"),
             lc.replace(" ", ""),
         }
-        # semantic aliases
-        if "payout" in lc:
-            keys |= {"payout", "totalpayout", "total_payout"}
-        if "eligib" in lc:
-            keys |= {"eligible", "mgeligible", "mg_eligible"}
-        if "user" in lc or "id_user" in lc:
-            keys |= {"user", "userid", "id_user"}
-        if "vendor" in lc:
-            keys |= {"vendor", "vendorname", "vendor_name"}
-        for k in keys:
-            m[k] = q
-    return m
+        for a in auto:
+            amap[a] = q
+
+        # curated per-column aliases
+        for a in curated.get(col, []):
+            amap[_norm(a)] = q
+            amap[a.lower()] = q
+            amap[a.replace(" ", "_").lower()] = q
+            amap[a.replace(" ", "").lower()] = q
+
+        # a few dataset-specific generic hints
+        if dataset_key == "mg":
+            if "payout" in lc: amap.update({"payout": q, "totalpayout": q, "total_payout": q})
+            if "eligib" in lc: amap.update({"eligible": q, "mgeligible": q, "mg_eligible": q})
+            if "user" in lc:   amap.update({"user": q, "userid": q, "id_user": q})
+            if "vendor" in lc: amap.update({"vendor": q, "vendorname": q, "vendor_name": q})
+        if dataset_key == "orders" and "price" in lc:
+            amap.update({"price": q, "amount": q})
+
+    return amap
+    
+def build_mg_synonym_map(mg_df: pd.DataFrame) -> Dict[str, str]:
+    # REPLACE body with this one-liner
+    return generate_alias_map(mg_df, "mg")
 
 def apply_mg_synonyms(sql: str, mg_df: pd.DataFrame) -> str:
     """
@@ -515,6 +537,31 @@ def ask():
     if mode == "data":     return safe_json(run_data_flow(q, analysis_style=False))
     return safe_json(run_web_flow(q))  # web
 
+@app.get("/schema/aliases")
+def get_aliases():
+    dataset = (request.args.get("dataset") or "").strip().lower()
+    inv, ords, mg = load_data_for_routes()
+
+    if dataset in ("order", "orders"):
+        key, df = "orders", ords
+    elif dataset in ("inventory", "inventory management", "inventory_management"):
+        key, df = "inventory", inv
+    elif dataset in ("mg", "minimum guarantee", "minimum_guarantee"):
+        key, df = "mg", mg
+    else:
+        return safe_json({"ok": False, "error": "Unknown dataset"}, 400)
+
+    amap = generate_alias_map(df, key)
+    # invert map for human-friendly view: canonical col -> aliases
+    inverted: Dict[str, List[str]] = {}
+    for alias, quoted_col in amap.items():
+        col = quoted_col.strip('"')
+        inverted.setdefault(col, []).append(alias)
+    for col in inverted:
+        inverted[col] = sorted(list(set(inverted[col])))
+
+    return safe_json({"ok": True, "dataset": key, "aliases": inverted})
+    
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT","8000")), debug=True)
