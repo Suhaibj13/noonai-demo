@@ -456,7 +456,7 @@ def run_analysis_flow(user_query: str) -> Dict:
 
     df, sql_used = last_result_df.copy(), last_result_sql
     try:
-        if isinstance(df, pd.DataFrame) and df.shape == (1,1)):
+        if isinstance(df, pd.DataFrame) and df.shape == (1,1):
             val = df.iloc[0,0]
             return {"reply": f"Answer: {val}\n\n(derived from: {sql_used})", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
     except Exception:
