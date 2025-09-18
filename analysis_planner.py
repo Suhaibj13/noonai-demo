@@ -164,26 +164,32 @@ def compile_plan_to_sql(plan: Dict) -> Tuple[bool, Optional[str], Optional[str]]
     if not sel_parts:
         return False, None, "No dimensions or metrics provided."
 
-    sql = f"SELECT\n  " + ",\n  ".join(sel_parts) + f"\nFROM {table}\n"
+    sql = "SELECT\n  " + ",\n  ".join(sel_parts) + f"\nFROM {table}\n"
 
     # WHERE
-    where_parts = []
+    where_parts: List[str] = []
     for f in filters:
-        col = f.get("column"); op = f.get("op"); val = f.get("value")
+        col = f.get("column")
+        op = f.get("op")
+        val = f.get("value")
+
         if col and op in _SQL_OPS:
             colq = _qual(table, col)
+
             if isinstance(val, str):
-            # if looks like a number, keep as number; else quote as string
-            if re.fullmatch(r"-?\d+(\.\d+)?", val):
-                where_parts.append(f"{colq} {op} {val}")
-            else:
-                safe_val = _sql_quote(val)  # pre-escape, no backslashes in f-string
-                where_parts.append(f"{colq} {op} {safe_val}")
+                # if looks like a number, keep as number; else quote as string
+                if re.fullmatch(r"-?\d+(\.\d+)?", val):
+                    where_parts.append(f"{colq} {op} {val}")
+                else:
+                    safe_val = _sql_quote(val)  # pre-escape single quotes
+                    where_parts.append(f"{colq} {op} {safe_val}")
             elif val is None:
-                # treat NULL/IS comparisons separately if needed; simplest: skip
+                # simplest behavior: skip NULL comparisons unless explicitly handled
                 continue
             else:
+                # numeric / boolean
                 where_parts.append(f"{colq} {op} {val}")
+
     if where_parts:
         sql += "WHERE " + " AND ".join(where_parts) + "\n"
 
@@ -193,14 +199,14 @@ def compile_plan_to_sql(plan: Dict) -> Tuple[bool, Optional[str], Optional[str]]
 
     # ORDER BY
     if sort:
-        s = []
+        s_parts: List[str] = []
         for srt in sort:
             by = srt.get("by")
             direction = (srt.get("dir") or "desc").upper()
             if by:
-                s.append(f"{_quote_ident(by)} {('DESC' if direction.startswith('D') else 'ASC')}")
-        if s:
-            sql += "ORDER BY " + ", ".join(s) + "\n"
+                s_parts.append(f"{_quote_ident(by)} {'DESC' if direction.startswith('D') else 'ASC'}")
+        if s_parts:
+            sql += "ORDER BY " + ", ".join(s_parts) + "\n"
 
     # LIMIT
     if isinstance(topn, int) and topn > 0:
