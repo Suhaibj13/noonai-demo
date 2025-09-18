@@ -49,12 +49,13 @@ def _schema_map(inv, ords, mg) -> Dict[str, List[str]]:
     }
 
 # --- prompt builders ---
+def _human_cols(cols):
+    # Quote columns that contain spaces/symbols for display in the schema block
+    return ", ".join([f'"{c}"' if re.search(r"\W", c) else c for c in cols])
+    
 def _plan_prompt(question: str, schema_cols: Dict[str, List[str]]) -> List[Dict]:
     # Render compact schema list for the model
-    schema_txt = "\n".join(
-        f"{k}: {', '.join([f'\"{c}\"' if re.search(r'\\W', c) else c for c in cols])}"
-        for k, cols in schema_cols.items()
-    )
+    schema_txt = "\n".join(f"{k}: {_human_cols(cols)}" for k, cols in schema_cols.items())
 
     sys = (
         "You are a data analyst. Given a QUESTION and the SCHEMA (tables: mg, orders, inventory), "
