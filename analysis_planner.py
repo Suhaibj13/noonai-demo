@@ -23,6 +23,11 @@ def _llm(messages: List[Dict], temperature: float = 0.0) -> str:
 # --- utils ---
 _SQL_OPS = {"=", "!=", ">", ">=", "<", "<="}
 
+def _sql_quote(val) -> str:
+    """Return a SQL string literal with single quotes escaped."""
+    s = str(val)
+    return "'" + s.replace("'", "''") + "'"
+    
 def _quote_ident(name: str) -> str:
     # Quote if it contains any non-word or starts with a digit
     if not name: return '""'
@@ -168,11 +173,12 @@ def compile_plan_to_sql(plan: Dict) -> Tuple[bool, Optional[str], Optional[str]]
         if col and op in _SQL_OPS:
             colq = _qual(table, col)
             if isinstance(val, str):
-                # if looks like a number, keep as number; else quote as string
-                if re.fullmatch(r"-?\d+(\.\d+)?", val):
-                    where_parts.append(f"{colq} {op} {val}")
-                else:
-                    where_parts.append(f"{colq} {op} '{val.replace(\"'\", \"''\")}'")
+            # if looks like a number, keep as number; else quote as string
+            if re.fullmatch(r"-?\d+(\.\d+)?", val):
+                where_parts.append(f"{colq} {op} {val}")
+            else:
+                safe_val = _sql_quote(val)  # pre-escape, no backslashes in f-string
+                where_parts.append(f"{colq} {op} {safe_val}")
             elif val is None:
                 # treat NULL/IS comparisons separately if needed; simplest: skip
                 continue
