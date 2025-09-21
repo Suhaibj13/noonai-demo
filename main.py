@@ -448,10 +448,9 @@ def run_analysis_flow(user_query: str) -> Dict:
                 try:
                     reply = llm_chat(
                         build_answer_prompt(
-                            f"{user_query}  (context: {canned.get('hint','')})",
+                            f"{user_query} (context: {canned.get('hint','')})",
                             summary,
-                            csv_head,
-                            col_names
+                            csv_head
                         ),
                         temperature=0.2
                     )
