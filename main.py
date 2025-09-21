@@ -15,7 +15,6 @@ from pandas.api.types import (
     is_datetime64_any_dtype,
     is_bool_dtype,
 )
-from mg_canned import detect_canned_mg
 from analysis_planner import plan_with_groq
 
 # -----------------------------------------------------------------------------
@@ -404,68 +403,6 @@ def run_analysis_flow(user_query: str) -> Dict:
 
     # --- Try planner first ---
     inv, ords, mg = load_data_for_routes()
-
-    # ---- 0) CANNED MG DEMO GUARD ----
-    try:
-        canned = detect_canned_mg(user_query or "")
-    except Exception:
-        canned = None
-
-    if canned:
-        inv, ords, mg = load_data_for_routes()
-        sql_used = canned["sql"]
-        try:
-            df = execute_sql(sql_used, inv, ords, mg)
-        except Exception as ex:
-            # If canned SQL ever fails, continue with normal flow
-            df = None
-
-        if df is not None:
-            # remember last result (so follow-ups like "these" work)
-            global last_result_df, last_result_sql, last_result_query
-            last_result_df, last_result_sql, last_result_query = df, sql_used, user_query
-
-            # Single-cell: keep your existing friendly wrapper
-            try:
-                if isinstance(df, pd.DataFrame) and df.shape == (1, 1):
-                    val = df.iloc[0, 0]
-                    return {
-                        "reply": f"Answer: {val}",
-                        "sql": None,  # hide SQL for single-cell (your current policy)
-                        "preview": trim_text(df_preview_string(df), 2000),
-                    }
-            except Exception:
-                pass
-
-            # Multi-row: use your existing explainer prompt for natural language
-            summary   = pre_analyze(df)
-            csv_head  = df_as_csv_snippet(df)
-            col_names = list(df.columns)
-
-            # Reuse your answer composer; this keeps the ChatGPT-style output
-            reply = None
-            if GROQ_API_KEY:
-                try:
-                    reply = llm_chat(
-                        build_answer_prompt(
-                            f"{user_query} (context: {canned.get('hint','')})",
-                            summary,
-                            csv_head
-                        ),
-                        temperature=0.2
-                    )
-                except Exception:
-                    reply = None
-
-            if not reply:
-                # deterministic fallback if Groq is unavailable
-                reply = "Answer prepared. See summary below."
-
-            return {
-                "reply": reply,
-                "sql": sql_used,  # keep SQL visible for transparency (as in your normal multi-row path)
-                "preview": trim_text(df_preview_string(df), 2000),
-            }
     try:
         plan_res = plan_with_groq(user_query, inv, ords, mg) if GROQ_API_KEY else {"ok": False, "error": "no_groq"}
     except Exception as e:
