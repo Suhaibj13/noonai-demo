@@ -16,6 +16,7 @@ from pandas.api.types import (
     is_bool_dtype,
 )
 from analysis_planner import plan_with_groq
+from demo_snapshots import detect_snapshot_card, render_snapshot_answer
 
 # -----------------------------------------------------------------------------
 # Init
@@ -392,8 +393,6 @@ def run_data_flow(question: str, analysis_style: bool = False, previous_sql: Opt
 # -----------------------------------------------------------------------------
 # Analysis flow (Groq → analysis SQL → Groq answers from rows; carries follow-up context)
 # -----------------------------------------------------------------------------
-from demo_snapshots import detect_snapshot_card, render_snapshot_answer
-
 def run_analysis_flow(user_query: str) -> Dict:
     """
     Analysis flow with Plan → Execute → Answer:
@@ -410,8 +409,20 @@ def run_analysis_flow(user_query: str) -> Dict:
         out = render_snapshot_answer(card)
         if out:
             return {"reply": out["reply"], "sql": None, "preview": out.get("preview", "")}
+    
     # 1) otherwise continue with your existing planner → SQL → answer
-
+    
+    # --- SNAPSHOT DEMO (Option A) ---
+    try:
+        card = detect_snapshot_card(user_query)
+    except Exception:
+        card = None
+    if card:
+        out = render_snapshot_answer(card)
+        if out:
+            # return chat-style text + tiny preview; no SQL for snapshots
+            return {"reply": out["reply"], "sql": None, "preview": out.get("preview", "")}
+    # --- (rest of your existing analysis flow continues below) ---
     global last_result_df, last_result_sql, last_result_query
     
     # --- Try planner first ---
