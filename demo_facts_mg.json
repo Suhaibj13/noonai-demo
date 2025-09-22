@@ -1,0 +1,220 @@
+{
+  "cards": [
+    {
+      "id": "mg_non_eligible_paid",
+      "title": "MG paid to non-eligible agents by vendor",
+      "facts": {
+        "vendors": 18,
+        "total_mg_paid": 125581173.0,
+        "top_vendor": "Desert Riders",
+        "top_vendor_mg": 12984317.0,
+        "top3_share": 0.31
+      },
+      "short_table": [
+        ["Vendor", "MG Paid"],
+        ["Desert Riders", 12984317.0],
+        ["Rapid Wheels", 12897721.0],
+        ["Swift Hands", 12890097.0]
+      ],
+      "narrative": {
+        "headline": "Desert Riders paid the most MG to non-eligible agents.",
+        "bullets": [
+          "Total MG to non-eligible agents is SAR 125.6M; top-3 vendors ≈ 31% of the total.",
+          "Concentration suggests policy-leakage risk at a few partners.",
+          "Recommend reviewing eligibility controls and exception approvals."
+        ]
+      }
+    },
+
+    {
+      "id": "mg_attendance_below_threshold",
+      "title": "Attendance shortfalls (below required days) by vendor",
+      "facts": { "top_vendor": "Rapid Wheels", "rows": 9176 },
+      "short_table": [
+        ["Vendor","Rows below threshold","Rows with MG"],
+        ["Rapid Wheels", 9176, 1880],
+        ["Swift Hands", 8820, 1711],
+        ["Desert Riders", 8613, 1699]
+      ],
+      "narrative": {
+        "headline": "Attendance shortfalls are concentrated in a handful of vendors.",
+        "bullets": [
+          "Rapid Wheels shows the most shortfalls; thousands still received MG.",
+          "Shortfalls correlate with higher exception usage.",
+          "Focus exception reviews and communication on the top 3 vendors."
+        ]
+      }
+    },
+
+    {
+      "id": "mg_top5_share",
+      "title": "Top-5 vendors by share of total MG",
+      "facts": { "top5_share": 0.57 },
+      "short_table": [
+        ["Vendor","MG Paid","Share of Total"],
+        ["Desert Riders", 12984317.0, 0.12],
+        ["Rapid Wheels", 12897721.0, 0.12],
+        ["Swift Hands", 12890097.0, 0.11],
+        ["First Company", 11890215.0, 0.11],
+        ["Green Wheels", 11658001.0, 0.11]
+      ],
+      "narrative": {
+        "headline": "MG payouts are concentrated—top-5 vendors ≈ 57% of total.",
+        "bullets": [
+          "Concentration raises the impact of any single-vendor policy issues.",
+          "Consider tiered controls for large partners.",
+          "Track concentration monthly as a key risk indicator."
+        ]
+      }
+    },
+
+    {
+      "id": "mg_non_eligible_avg_per_da",
+      "title": "Non-eligible agents who received MG — totals & average per agent (by vendor)",
+      "facts": { "avg_per_da_top_vendor": 415.20 },
+      "short_table": [
+        ["Vendor","DAs","MG Paid","Avg per DA"],
+        ["Desert Riders", 7200, 2984317.0, 414.5],
+        ["Rapid Wheels", 7050, 2877721.0, 408.4],
+        ["Swift Hands", 6899, 2790097.0, 404.3]
+      ],
+      "narrative": {
+        "headline": "Non-eligible MG is material at several vendors.",
+        "bullets": [
+          "Average MG per non-eligible DA exceeds SAR 400 at top vendors.",
+          "High averages likely reflect repeated exceptions.",
+          "Recommend targeted policy refresh and exception caps."
+        ]
+      }
+    },
+
+    {
+      "id": "mg_monthly_spike_drop",
+      "title": "Months with >30% spike/drop in MG payouts",
+      "facts": { "months_flagged": 2 },
+      "short_table": [
+        ["Month","MG Paid","MoM Change"],
+        ["2024-03-01", 8240000.0, 0.42],
+        ["2024-04-01", 5750000.0, -0.30]
+      ],
+      "narrative": {
+        "headline": "Two months show >30% swings in MG.",
+        "bullets": [
+          "March spike linked to onboarding push; April correction follows.",
+          "Large swings deserve pre-approval tracking and root-cause notes.",
+          "Monitor vendor-level drivers in swing months."
+        ]
+      }
+    },
+
+    {
+      "id": "mg_top_vendors_in_swing_months",
+      "title": "Top vendors in swing months",
+      "facts": {},
+      "short_table": [
+        ["Month","Vendor","MG Paid"],
+        ["2024-03-01","Desert Riders", 1490000.0],
+        ["2024-03-01","Rapid Wheels", 1420000.0],
+        ["2024-03-01","Swift Hands", 1380000.0]
+      ],
+      "narrative": {
+        "headline": "Swing months are driven by the same three vendors.",
+        "bullets": [
+          "Concentration of drivers suggests targeted corrective action.",
+          "Add pre-spike vendor briefings when onboarding surges are planned."
+        ]
+      }
+    },
+
+    {
+      "id": "mg_over_mg_outliers",
+      "title": "Final payout more than 20% over MG (outliers)",
+      "facts": { "rows": 50 },
+      "short_table": [
+        ["DA","Vendor","Over-MG Ratio","Final","MG"],
+        ["U1234","Desert Riders", 0.37, 980, 715],
+        ["U5678","Rapid Wheels", 0.33, 1010, 760]
+      ],
+      "narrative": {
+        "headline": "We found multiple over-MG outliers (>20%).",
+        "bullets": [
+          "Outliers cluster in a few vendors and months.",
+          "Review incentive stacking or manual overrides.",
+          "Introduce thresholds for auto-review."
+        ]
+      }
+    },
+
+    {
+      "id": "mg_early_tenure_repeated_mg",
+      "title": "Repeated MG within first 30 days after joining",
+      "facts": { "agents": 64 },
+      "short_table": [
+        ["Vendor","DA","Early-MG Count","Early-MG Paid"],
+        ["Desert Riders","U4321", 3, 720],
+        ["Rapid Wheels","U8765", 2, 440]
+      ],
+      "narrative": {
+        "headline": "Repeated early-tenure MG is present.",
+        "bullets": [
+          "Do early exceptions correlate with long-term performance?",
+          "Consider a graduated MG policy for first 30 days."
+        ]
+      }
+    },
+
+    {
+      "id": "mg_rate_outliers",
+      "title": "Rate outliers (|z| > 3) by vendor",
+      "facts": {},
+      "short_table": [
+        ["Vendor","Outlier Rows","Outlier Rate"],
+        ["Desert Riders", 118, 0.023],
+        ["Rapid Wheels", 112, 0.021]
+      ],
+      "narrative": {
+        "headline": "Rate anomalies are concentrated in top partners.",
+        "bullets": [
+          "Outlier share is elevated versus network baseline.",
+          "Introduce rate sanity checks at assignment time."
+        ]
+      }
+    },
+
+    {
+      "id": "mg_multi_vendor_same_month",
+      "title": "Agents tied to multiple vendors in the same month",
+      "facts": { "rows": 19 },
+      "short_table": [
+        ["Month","DA","Vendors in Month","MG Total"],
+        ["2024-04-01","U2222", 2, 380],
+        ["2024-04-01","U3333", 3, 510]
+      ],
+      "narrative": {
+        "headline": "A subset of agents are linked to multiple vendors in a single month.",
+        "bullets": [
+          "Investigate potential reassignment or duplicate contracting.",
+          "Align MG payment ownership for overlapping cases."
+        ]
+      }
+    },
+
+    {
+      "id": "mg_city_outliers",
+      "title": "Cities with unusual eligibility or MG payment rates",
+      "facts": {},
+      "short_table": [
+        ["City","Eligibility Rate","MG Payment Rate","Δ vs Overall (MG)"],
+        ["ruh", 0.41, 0.28, 0.11],
+        ["jed", 0.39, 0.27, 0.10]
+      ],
+      "narrative": {
+        "headline": "Two cities show elevated MG payment rates vs. overall.",
+        "bullets": [
+          "Patterns are consistent across several months.",
+          "Consider city-specific controls or thresholds."
+        ]
+      }
+    }
+  ]
+}
