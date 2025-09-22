@@ -392,6 +392,8 @@ def run_data_flow(question: str, analysis_style: bool = False, previous_sql: Opt
 # -----------------------------------------------------------------------------
 # Analysis flow (Groq → analysis SQL → Groq answers from rows; carries follow-up context)
 # -----------------------------------------------------------------------------
+from demo_snapshots import detect_snapshot_card, render_snapshot_answer
+
 def run_analysis_flow(user_query: str) -> Dict:
     """
     Analysis flow with Plan → Execute → Answer:
@@ -399,8 +401,19 @@ def run_analysis_flow(user_query: str) -> Dict:
     2) If planner confident and no clarification needed, run compiled SQL.
     3) Otherwise, fall back to existing Groq→SQL path (run_data_flow with analysis_style=True).
     """
-    global last_result_df, last_result_sql, last_result_query
+    # 0) Snapshot demo check (returns friendly text; no SQL)
+    try:
+        card = detect_snapshot_card(user_query)
+    except Exception:
+        card = None
+    if card:
+        out = render_snapshot_answer(card)
+        if out:
+            return {"reply": out["reply"], "sql": None, "preview": out.get("preview", "")}
+    # 1) otherwise continue with your existing planner → SQL → answer
 
+    global last_result_df, last_result_sql, last_result_query
+    
     # --- Try planner first ---
     inv, ords, mg = load_data_for_routes()
     try:
