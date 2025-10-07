@@ -575,39 +575,39 @@ def ask():
     if mode == "analysis": return safe_json(run_analysis_flow(q))
     if mode == "data":     return safe_json(run_data_flow(q, analysis_style=False))
     if mode == "web":
-    # Step 2a: If we are waiting for background, use current q as background and complete the observation.
-    if obs_state.awaiting_background:
-        background = q.strip()
-        obs_state.awaiting_background = False
-        if not obs_state.last_analysis_text:
-            return safe_json({
-                "ok": True,
-                "mode": mode,
-                "reply": "I don’t have a recent analysis to base this on. Please run an analysis first."
-            })
-        obs_text = generate_observation(llm, background, obs_state.last_analysis_text)
-        return safe_json({"ok": True, "mode": mode, "reply": obs_text})
-
-    # Step 1: Detect intent to create observation from recent analysis
-    if detect_observation_intent(q):
-        if not obs_state.last_analysis_text:
-            return safe_json({
-                "ok": True,
-                "mode": mode,
-                "reply": "I don’t have a recent analysis to convert. Please run your request in Analysis mode first."
-            })
-        obs_state.awaiting_background = True
-        ask_bg = (
-            "Got it — I’ll create the observation. First, give me a short BACKGROUND:\n"
-            "• Business context (process/area, period, scope)\n"
-            "• Any constraints (data coverage, geography, vendor subset)\n"
-            "• Stakeholder sensitivity (leadership/ops focus)\n\n"
-            "Reply with the background in your own words."
-        )
-        return safe_json({"ok": True, "mode": mode, "reply": ask_bg})
-
-    # Fallback to your normal web flow:
-    return safe_json(run_web_flow(q))  # web
+        # Step 2a: If we are waiting for background, use current q as background and complete the observation.
+        if obs_state.awaiting_background:
+            background = q.strip()
+            obs_state.awaiting_background = False
+            if not obs_state.last_analysis_text:
+                return safe_json({
+                    "ok": True,
+                    "mode": mode,
+                    "reply": "I don’t have a recent analysis to base this on. Please run an analysis first."
+                })
+            obs_text = generate_observation(llm, background, obs_state.last_analysis_text)
+            return safe_json({"ok": True, "mode": mode, "reply": obs_text})
+    
+        # Step 1: Detect intent to create observation from recent analysis
+        if detect_observation_intent(q):
+            if not obs_state.last_analysis_text:
+                return safe_json({
+                    "ok": True,
+                    "mode": mode,
+                    "reply": "I don’t have a recent analysis to convert. Please run your request in Analysis mode first."
+                })
+            obs_state.awaiting_background = True
+            ask_bg = (
+                "Got it — I’ll create the observation. First, give me a short BACKGROUND:\n"
+                "• Business context (process/area, period, scope)\n"
+                "• Any constraints (data coverage, geography, vendor subset)\n"
+                "• Stakeholder sensitivity (leadership/ops focus)\n\n"
+                "Reply with the background in your own words."
+            )
+            return safe_json({"ok": True, "mode": mode, "reply": ask_bg})
+    
+        # Fallback to your normal web flow
+        return safe_json(run_web_flow(q))
 
 @app.get("/schema/aliases")
 def get_aliases():
