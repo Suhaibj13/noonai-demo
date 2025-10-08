@@ -17,9 +17,6 @@ from pandas.api.types import (
 )
 from analysis_planner import plan_with_groq
 from demo_snapshots import detect_snapshot_card, render_snapshot_answer
-# NEW: AURA observation glue
-from shared_state import obs_state
-from observation import detect_observation_intent, generate_observation
 
 # -----------------------------------------------------------------------------
 # Init
@@ -55,20 +52,6 @@ def llm_chat(messages: List[Dict], temperature: float = 0.0) -> str:
         model=GROQ_MODEL, messages=messages, temperature=temperature
     )
     return resp.choices[0].message.content.strip()
-# Add this helper only if not present
-def llm(prompt: str, system: str = "", temperature: float = 0.2) -> str:
-    # Reuse your existing Groq/OpenAI client and default model
-    # Adjust to match your code if names differ.
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-    resp = client.chat.completions.create(
-        model=os.getenv("MODEL", "llama-3.1-70b-versatile"),
-        messages=messages,
-        temperature=temperature,
-    )
-    return resp.choices[0].message.content
 
 # -----------------------------------------------------------------------------
 # Utils
@@ -416,16 +399,7 @@ def run_analysis_flow(user_query: str) -> Dict:
     1) Try planner (Groq → JSON plan → compiled SQL).
     2) If planner confident and no clarification needed, run compiled SQL.
     3) Otherwise, fall back to existing Groq→SQL path (run_data_flow with analysis_style=True).
-    Also: save the final analysis text in obs_state.last_analysis_text for the 'observation' feature.
     """
-    # helper to persist the final reply text (used for the "create observation" step)
-    def _ret(d: Dict) -> Dict:
-        try:
-            obs_state.last_analysis_text = (d.get("reply") or "").strip()
-        except Exception:
-            pass
-        return d
-
     # 0) Snapshot demo check (returns friendly text; no SQL)
     try:
         card = detect_snapshot_card(user_query)
@@ -434,11 +408,24 @@ def run_analysis_flow(user_query: str) -> Dict:
     if card:
         out = render_snapshot_answer(card)
         if out:
+            return {"reply": out["reply"], "sql": None, "preview": out.get("preview", "")}
+    
+    # 1) otherwise continue with your existing planner → SQL → answer
+    
+    # --- SNAPSHOT DEMO (Option A) ---
+    try:
+        card = detect_snapshot_card(user_query)
+    except Exception:
+        card = None
+    if card:
+        out = render_snapshot_answer(card)
+        if out:
             # return chat-style text + tiny preview; no SQL for snapshots
-            return _ret({"reply": out["reply"], "sql": None, "preview": out.get("preview", "")})
-
-    # --- planner-first path ---
+            return {"reply": out["reply"], "sql": None, "preview": out.get("preview", "")}
+    # --- (rest of your existing analysis flow continues below) ---
     global last_result_df, last_result_sql, last_result_query
+    
+    # --- Try planner first ---
     inv, ords, mg = load_data_for_routes()
     try:
         plan_res = plan_with_groq(user_query, inv, ords, mg) if GROQ_API_KEY else {"ok": False, "error": "no_groq"}
@@ -446,75 +433,69 @@ def run_analysis_flow(user_query: str) -> Dict:
         plan_res = {"ok": False, "error": f"planner error: {e}"}
 
     if plan_res.get("ok") and not plan_res.get("needs_clarification") and plan_res.get("sql"):
+        # Execute compiled SQL deterministically
         sql_used = plan_res["sql"]
         try:
             df = execute_sql(sql_used, inv, ords, mg)
-        except Exception:
-            # If compiled SQL fails for any reason, fall back to the classic path
-            data_res = run_data_flow(user_query, analysis_style=True, previous_sql=None)
-            # If that fallback immediately returns (e.g., error), still persist reply
-            return _ret(data_res)
+        except Exception as ex:
+            # If compiled SQL still fails for any reason, fall back to old path
+            return run_data_flow(user_query, analysis_style=True, previous_sql=None)
 
         last_result_df, last_result_sql, last_result_query = df, sql_used, user_query
 
-        # Single-cell shortcut (same behavior as before)
+        # Single-cell shortcut (keep current behavior)
         try:
             if isinstance(df, pd.DataFrame) and df.shape == (1, 1):
                 val = df.iloc[0, 0]
-                return _ret({
+                return {
                     "reply": f"Answer: {val}\n\n(derived from: {sql_used})",
                     "sql": sql_used,
                     "preview": trim_text(df_preview_string(df), 2000),
-                })
+                }
         except Exception:
             pass
 
-        # Multi-row: compose answer with the existing build_answer_prompt
+        # Multi-row: compose answer with existing prompt
         summary  = pre_analyze(df)
         csv_head = df_as_csv_snippet(df)
         try:
             answer = llm_chat(build_answer_prompt(user_query, summary, csv_head), temperature=0.0)
-            return _ret({"reply": answer, "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)})
+            return {"reply": answer, "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
         except Exception:
-            return _ret({"reply": "Analysis ready. See the first rows below.", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)})
+            return {"reply": "Analysis ready. See the first rows below.", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
 
-    # --- Clarification requested by planner ---
+    # --- Clarification from planner ---
     if plan_res.get("ok") and plan_res.get("needs_clarification"):
-        return _ret({"reply": plan_res.get("clarify") or "Please clarify your request.", "sql": None, "preview": None})
+        return {"reply": plan_res.get("clarify") or "Please clarify your request.", "sql": None, "preview": None}
 
-    # --- Fallback: classic Groq→SQL analysis path (with previous result reuse) ---
+    # --- Fallback: use your existing Groq→SQL analysis path ---
+    # Keep previous-follow-up handling exactly as before
     ql = (user_query or "").lower()
     wants_reuse = any(p in ql for p in REUSE_PHRASES)
     prev_sql = last_result_sql if wants_reuse else None
 
     data_res = run_data_flow(user_query, analysis_style=True, previous_sql=prev_sql)
     if not data_res.get("preview"):
-        # If classic path ends early (e.g., error or no preview), still persist the reply
-        return _ret(data_res)
+        return data_res
 
-    # Continue with composed answer from the newly produced df/sql
     df, sql_used = last_result_df.copy(), last_result_sql
     try:
-        if isinstance(df, pd.DataFrame) and df.shape == (1, 1):
-            val = df.iloc[0, 0]
-            return _ret({
-                "reply": f"Answer: {val}\n\n(derived from: {sql_used})",
-                "sql": sql_used,
-                "preview": trim_text(df_preview_string(df), 2000)
-            })
+        if isinstance(df, pd.DataFrame) and df.shape == (1,1):
+            val = df.iloc[0,0]
+            return {"reply": f"Answer: {val}\n\n(derived from: {sql_used})", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
     except Exception:
         pass
 
     if not GROQ_API_KEY:
-        return _ret({"reply": "Analysis fallback (no Groq). See preview and compute manually.", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)})
+        return {"reply":"Analysis fallback (no Groq). See preview and compute manually.", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
 
     summary  = pre_analyze(df)
     csv_head = df_as_csv_snippet(df)
     try:
         answer = llm_chat(build_answer_prompt(user_query, summary, csv_head), temperature=0.0)
-        return _ret({"reply": answer, "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)})
-    except Exception:
-        return _ret({"reply": f"Analysis error. Rows derived from: {sql_used}", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)})
+        return {"reply": answer, "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
+    except Exception as ex:
+        return {"reply": f"Analysis error. Rows derived from: {sql_used}", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
         
 # -----------------------------------------------------------------------------
 # /schema (for Data → Extract: list columns & simple types)
@@ -574,40 +555,7 @@ def ask():
 
     if mode == "analysis": return safe_json(run_analysis_flow(q))
     if mode == "data":     return safe_json(run_data_flow(q, analysis_style=False))
-    if mode == "web":
-        # Step 2a: If we are waiting for background, use current q as background and complete the observation.
-        if obs_state.awaiting_background:
-            background = q.strip()
-            obs_state.awaiting_background = False
-            if not obs_state.last_analysis_text:
-                return safe_json({
-                    "ok": True,
-                    "mode": mode,
-                    "reply": "I don’t have a recent analysis to base this on. Please run an analysis first."
-                })
-            obs_text = generate_observation(llm, background, obs_state.last_analysis_text)
-            return safe_json({"ok": True, "mode": mode, "reply": obs_text})
-    
-        # Step 1: Detect intent to create observation from recent analysis
-        if detect_observation_intent(q):
-            if not obs_state.last_analysis_text:
-                return safe_json({
-                    "ok": True,
-                    "mode": mode,
-                    "reply": "I don’t have a recent analysis to convert. Please run your request in Analysis mode first."
-                })
-            obs_state.awaiting_background = True
-            ask_bg = (
-                "Got it — I’ll create the observation. First, give me a short BACKGROUND:\n"
-                "• Business context (process/area, period, scope)\n"
-                "• Any constraints (data coverage, geography, vendor subset)\n"
-                "• Stakeholder sensitivity (leadership/ops focus)\n\n"
-                "Reply with the background in your own words."
-            )
-            return safe_json({"ok": True, "mode": mode, "reply": ask_bg})
-    
-        # Fallback to your normal web flow
-        return safe_json(run_web_flow(q))
+    return safe_json(run_web_flow(q))  # web
 
 @app.get("/schema/aliases")
 def get_aliases():
