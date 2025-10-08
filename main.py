@@ -17,6 +17,8 @@ from pandas.api.types import (
 )
 from analysis_planner import plan_with_groq
 from demo_snapshots import detect_snapshot_card, render_snapshot_answer
+from session_memory import history, wants_observation, build_observation
+
 
 # -----------------------------------------------------------------------------
 # Init
@@ -553,34 +555,76 @@ def ask():
     if not q:
         return safe_json({"ok": True, "mode": mode, "reply": "Please type a question."})
 
-    if mode == "analysis": return safe_json(run_analysis_flow(q))
-    if mode == "data":     return safe_json(run_data_flow(q, analysis_style=False))
-    return safe_json(run_web_flow(q))  # web
+    # ---------- Web mode: observation flow + logging ----------
+    if mode == "web":
+        # Step 2: If we are waiting for BACKGROUND, use this message to build observation
+        if history.awaiting_background.get("web"):
+            history.awaiting_background["web"] = False
+            background = q
 
-@app.get("/schema/aliases")
-def get_aliases():
-    dataset = (request.args.get("dataset") or "").strip().lower()
-    inv, ords, mg = load_data_for_routes()
+            # We build observation from the LAST WEB REPLY (not analysis)
+            prior_web_reply = history.last_reply("web")
+            if not prior_web_reply:
+                msg = "I don’t have any prior web reply to base an observation on. Ask something in web mode first."
+                history.log("web", q, msg)
+                return safe_json({"ok": True, "mode": mode, "reply": msg})
 
-    if dataset in ("order", "orders"):
-        key, df = "orders", ords
-    elif dataset in ("inventory", "inventory management", "inventory_management"):
-        key, df = "inventory", inv
-    elif dataset in ("mg", "minimum guarantee", "minimum_guarantee"):
-        key, df = "mg", mg
-    else:
-        return safe_json({"ok": False, "error": "Unknown dataset"}, 400)
+            # llm callable adapter: reuse your existing llm_chat(...) signature
+            def _llm(prompt: str, system: str = "", temperature: float = 0.2) -> str:
+                # If your helper is named differently, adjust the call below
+                return llm_chat(prompt, system=system, temperature=temperature)
 
-    amap = generate_alias_map(df, key)
-    # invert map for human-friendly view: canonical col -> aliases
-    inverted: Dict[str, List[str]] = {}
-    for alias, quoted_col in amap.items():
-        col = quoted_col.strip('"')
-        inverted.setdefault(col, []).append(alias)
-    for col in inverted:
-        inverted[col] = sorted(list(set(inverted[col])))
+            obs_text = build_observation(_llm, background, prior_web_reply)
+            history.log("web", f"[BACKGROUND] {background}", obs_text)
+            return safe_json({"ok": True, "mode": mode, "reply": obs_text})
 
-    return safe_json({"ok": True, "dataset": key, "aliases": inverted})
+        # Step 1: detect intent to create an observation
+        if wants_observation(q):
+            history.awaiting_background["web"] = True
+            ask_bg = (
+                "Got it — I’ll create the observation. First, give me a short BACKGROUND:\n"
+                "• Business context (process/area, period, scope)\n"
+                "• Any constraints (data coverage, geography, vendor subset)\n"
+                "• Stakeholder sensitivity (leadership/ops focus)\n\n"
+                "Reply with the background in your own words."
+            )
+            history.log("web", q, ask_bg)
+            return safe_json({"ok": True, "mode": mode, "reply": ask_bg})
+
+        # Normal web flow
+        res = run_web_flow(q)
+        try:
+            history.log("web", q, res.get("reply") or "")
+        except Exception:
+            pass
+        return safe_json(res)
+
+    # ---------- Analysis mode: normal routing + logging ----------
+    if mode == "analysis":
+        res = run_analysis_flow(q)
+        try:
+            history.log("analysis", q, res.get("reply") or "")
+        except Exception:
+            pass
+        return safe_json(res)
+
+    # ---------- Data mode (unchanged) + logging ----------
+    if mode == "data":
+        res = run_data_flow(q, analysis_style=False)
+        try:
+            history.log("data", q, res.get("reply") or "")
+        except Exception:
+            pass
+        return safe_json(res)
+
+    # Fallback to web
+    res = run_web_flow(q)
+    try:
+        history.log("web", q, res.get("reply") or "")
+    except Exception:
+        pass
+    return safe_json(res)
+
     
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
