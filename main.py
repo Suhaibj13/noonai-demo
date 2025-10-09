@@ -555,43 +555,26 @@ def ask():
     if not q:
         return safe_json({"ok": True, "mode": mode, "reply": "Please type a question."})
 
-    # ---------- Web mode: observation flow + logging ----------
+    # ---------- Web mode: observation intent + normal web flow (with logging) ----------
     if mode == "web":
-        # Step 2: If we are waiting for BACKGROUND, use this message to build observation
-        if history.awaiting_background.get("web"):
-            history.awaiting_background["web"] = False
-            background = q
-
-            # We build observation from the LAST WEB REPLY (not analysis)
-            prior_web_reply = history.last_reply("web")
-            if not prior_web_reply:
-                msg = "I don’t have any prior web reply to base an observation on. Ask something in web mode first."
+        # If user asks for an observation, immediately convert the latest reply into a 4-part observation.
+        if wants_observation(q):
+            # Prefer the most recent reply across web → analysis → data
+            prior_reply = history.latest_reply_any(prefer_order=["web", "analysis", "data"])
+            if not prior_reply:
+                msg = "I don’t have any prior answer to convert. Ask something first, then say 'create an observation'."
                 history.log("web", q, msg)
                 return safe_json({"ok": True, "mode": mode, "reply": msg})
 
-            # llm callable adapter: reuse your existing llm_chat(...) signature
+            # LLM adapter (reuse your existing helper)
             def _llm(prompt: str, system: str = "", temperature: float = 0.2) -> str:
-                # If your helper is named differently, adjust the call below
                 return llm_chat(prompt, system=system, temperature=temperature)
 
-            obs_text = build_observation(_llm, background, prior_web_reply)
-            history.log("web", f"[BACKGROUND] {background}", obs_text)
+            obs_text = build_observation(_llm, prior_reply)
+            history.log("web", q, obs_text)
             return safe_json({"ok": True, "mode": mode, "reply": obs_text})
 
-        # Step 1: detect intent to create an observation
-        if wants_observation(q):
-            history.awaiting_background["web"] = True
-            ask_bg = (
-                "Got it — I’ll create the observation. First, give me a short BACKGROUND:\n"
-                "• Business context (process/area, period, scope)\n"
-                "• Any constraints (data coverage, geography, vendor subset)\n"
-                "• Stakeholder sensitivity (leadership/ops focus)\n\n"
-                "Reply with the background in your own words."
-            )
-            history.log("web", q, ask_bg)
-            return safe_json({"ok": True, "mode": mode, "reply": ask_bg})
-
-        # Normal web flow
+        # Otherwise: normal web flow
         res = run_web_flow(q)
         try:
             history.log("web", q, res.get("reply") or "")
@@ -608,7 +591,7 @@ def ask():
             pass
         return safe_json(res)
 
-    # ---------- Data mode (unchanged) + logging ----------
+    # ---------- Data mode: normal routing + logging ----------
     if mode == "data":
         res = run_data_flow(q, analysis_style=False)
         try:
@@ -624,6 +607,7 @@ def ask():
     except Exception:
         pass
     return safe_json(res)
+
 
     
 # -----------------------------------------------------------------------------
