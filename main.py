@@ -574,7 +574,10 @@ def ask():
     # --------- 0) Handle 'observation' EARLY (works in ANY mode) ---------
     # If user asks for an observation, immediately convert the latest reply into a 4-part observation.
     if wants_observation(q):
-        prior_reply = history.latest_reply_any(prefer_order=["web", "analysis", "data"])
+        prior_reply_obj = history.latest_reply_any(prefer_order=["web", "analysis", "data"])
+        prior_reply = (
+            prior_reply_obj.get("reply") if isinstance(prior_reply_obj, dict) else prior_reply_obj
+        )
         if not prior_reply:
             msg = "I don’t have any prior answer to convert. Ask something first, then say 'create an observation'."
             try:
@@ -592,8 +595,13 @@ def ask():
         # LLM adapter (reuse your existing helper)
         def _llm(prompt: str, system: str = "", temperature: float = 0.2) -> str:
             return llm_chat(prompt, system=system, temperature=temperature)
-
-        obs_text = build_observation(_llm, prior_reply)
+            
+        if not prior_reply or not str(prior_reply).strip():
+            msg = "No valid previous response found to convert into an observation."
+            history.log(mode, q, msg)
+            return safe_json({"ok": True, "mode": mode, "reply": msg})
+        
+        obs_text = build_observation(_llm, prior_reply or "")
         try:
             history.log(mode, q, obs_text)
         except Exception:
