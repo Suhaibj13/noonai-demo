@@ -29,6 +29,13 @@ const sendBtn = $("#send");
 const statusEl = $("#status");
 const modeLabelEl = $("#mode");
 const resetBtn = $("#reset-btn");
+const schemaSel = document.querySelector("#schema-selector");
+if (schemaSel) {
+  window.PROJECT.mainTable = schemaSel.value;        // init on load
+  schemaSel.addEventListener("change", () => {
+    window.PROJECT.mainTable = schemaSel.value;      // update on change
+  });
+}
 
 const state = { sending: false, mode: "web", history: [] };
 
