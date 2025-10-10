@@ -129,8 +129,12 @@ async function send(){
       addMessage("ai", `Error: ${res?.error || "Unknown error"}`);
     } else {
       addMessage("ai", String((res.reply ?? "(no reply)")).trim());
-      if (res.preview) renderPreview(res.preview); // optional, if you have this
-      if (res.sql)     renderSql(res.sql);         // optional, if you have this
+      if (res && res.preview && typeof window.renderPreview === "function") {
+        window.renderPreview(res.preview);
+      }
+      if (res && res.sql && typeof window.renderSql === "function") {
+        window.renderSql(res.sql);
+      }
     }
     // ⬆⬆⬆
   
@@ -229,9 +233,20 @@ document.querySelectorAll("[data-q]").forEach(btn => {
         addMessage("ai", `Error: ${res?.error || "Unknown error"}`);
       } else {
         addMessage("ai", String((res.reply ?? "(no reply)")).trim());
+    
+        // ⬇⬇⬇ 2nd point goes here (guarded preview/SQL renderers)
+        if (res && res.preview && typeof window.renderPreview === "function") {
+          window.renderPreview(res.preview);
+        }
+        if (res && res.sql && typeof window.renderSql === "function") {
+          window.renderSql(res.sql);
+        }
+        // ⬆⬆⬆
+    
         if (statusEl) statusEl.textContent = "Ready";
       }
     })
+
     .catch(e => {
       removeTyping();
       addMessage("ai", `Error: ${e.message}`);
