@@ -336,10 +336,27 @@ def run_web_flow(q: str) -> Dict:
 # -----------------------------------------------------------------------------
 # Data flow (Groq → SQL → DuckDB, with column guard & repair)
 # -----------------------------------------------------------------------------
-def run_data_flow(question: str, analysis_style: bool = False, previous_sql: Optional[str]=None) -> Dict:
+def run_data_flow(question: str,
+                  analysis_style: bool = False,
+                  previous_sql: Optional[str] = None,
+                  table_context: Optional[dict] = None) -> Dict:
     global last_result_df, last_result_sql, last_result_query
     inv, ords, mg = load_data_for_routes()
     schema = build_schema_description(inv, ords, mg)
+                      
+    # NEW: enrich schema with project table + join info if provided
+    if table_context:
+        tc = table_context
+        extra_bits = []
+        if tc.get("project_table"):
+            extra_bits.append(f"Primary table: {tc['project_table']}")
+        if tc.get("from_clause"):
+            extra_bits.append(f"Use this FROM/JOIN clause exactly:\n{tc['from_clause']}")
+        if tc.get("joined_schema_text"):
+            extra_bits.append("Schema (table.column: TYPE):\n" + tc["joined_schema_text"])
+    
+        if extra_bits:
+            schema = (schema or "").rstrip() + "\n\n" + "\n".join(extra_bits)
 
     if not GROQ_API_KEY:
         sql = "SELECT * FROM orders LIMIT 50"
@@ -395,7 +412,8 @@ def run_data_flow(question: str, analysis_style: bool = False, previous_sql: Opt
 # -----------------------------------------------------------------------------
 # Analysis flow (Groq → analysis SQL → Groq answers from rows; carries follow-up context)
 # -----------------------------------------------------------------------------
-def run_analysis_flow(user_query: str) -> Dict:
+def run_analysis_flow(user_query: str,
+                      table_context: Optional[dict] = None) -> Dict:
     """
     Analysis flow with Plan → Execute → Answer:
     1) Try planner (Groq → JSON plan → compiled SQL).
@@ -441,7 +459,7 @@ def run_analysis_flow(user_query: str) -> Dict:
             df = execute_sql(sql_used, inv, ords, mg)
         except Exception as ex:
             # If compiled SQL still fails for any reason, fall back to old path
-            return run_data_flow(user_query, analysis_style=True, previous_sql=None)
+            return run_data_flow(user_query, analysis_style=True, previous_sql=None, table_context=table_context)
 
         last_result_df, last_result_sql, last_result_query = df, sql_used, user_query
 
@@ -465,6 +483,9 @@ def run_analysis_flow(user_query: str) -> Dict:
             return {"reply": answer, "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
         except Exception:
             return {"reply": "Analysis ready. See the first rows below.", "sql": sql_used, "preview": trim_text(df_preview_string(df), 2000)}
+
+        
+
 
     # --- Clarification from planner ---
     if plan_res.get("ok") and plan_res.get("needs_clarification"):
@@ -546,11 +567,24 @@ def index(): return render_template("index.html")
 @app.get("/health")
 def health(): return "ok", 200
 
+from join_builder import build_from_and_schema  # NEW
 @app.post("/ask")
 def ask():
     payload = request.get_json(force=True) or {}
     q    = (payload.get("q") or payload.get("query") or "").strip()
     mode = (payload.get("mode") or "web").lower()
+
+    # NEW: project context coming from frontend (safe if absent)
+    project_table = payload.get("projectTable") or None
+    joins = payload.get("joins") or []
+
+    # Build FROM/JOIN clause + schema text (empty strings if no project_table)
+    from_clause, joined_schema_text = build_from_and_schema(project_table, joins)
+    table_context = {
+        "project_table": project_table,
+        "from_clause": from_clause,               # e.g., "FROM order_items LEFT JOIN inventory_items USING (product_id)"
+        "joined_schema_text": joined_schema_text  # multi-line "table.column: TYPE"
+    }
 
     if not q:
         return safe_json({"ok": True, "mode": mode, "reply": "Please type a question."})
@@ -584,7 +618,7 @@ def ask():
 
     # ---------- Analysis mode: normal routing + logging ----------
     if mode == "analysis":
-        res = run_analysis_flow(q)
+        res = run_analysis_flow(q, table_context=table_context)   # CHANGED
         try:
             history.log("analysis", q, res.get("reply") or "")
         except Exception:
@@ -593,7 +627,7 @@ def ask():
 
     # ---------- Data mode: normal routing + logging ----------
     if mode == "data":
-        res = run_data_flow(q, analysis_style=False)
+        res = run_data_flow(q, analysis_style=False, table_context=table_context)  # CHANGED
         try:
             history.log("data", q, res.get("reply") or "")
         except Exception:
