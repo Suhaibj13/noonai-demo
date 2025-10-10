@@ -615,18 +615,13 @@ def ask():
         })
 
     # --------- 1) Normal routing (unchanged logic per mode) ---------
-    if wants_observation(q):
-    prior_reply_obj = history.latest_reply_any(prefer_order=["web", "analysis", "data"])
-    prior_reply = (prior_reply_obj.get("reply") if isinstance(prior_reply_obj, dict) else prior_reply_obj)
-    if not prior_reply or not str(prior_reply).strip():
-        msg = "I don’t have any prior answer to convert. Ask something first, then say 'create an observation'."
-        try: history.log(mode, q, msg)
-        except Exception: pass
-        return safe_json({"ok": True, "mode": mode, "reply": msg, "context_used": False,
-                          "context_size": history.size() if hasattr(history, "size") else None})
 
     def _llm(prompt: str, system: str = "", temperature: float = 0.2) -> str:
-        return llm_chat(prompt, system=system, temperature=temperature)
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        return llm_chat(messages, temperature=temperature)
 
     obs_text = build_observation(_llm, prior_reply or "")
     try: history.log(mode, q, obs_text)
