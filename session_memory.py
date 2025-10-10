@@ -27,33 +27,15 @@ class ConversationHistory:
         return dq[-1][2] if dq else None
 
     def latest_reply_any(self, prefer_order: Optional[List[str]] = None) -> Optional[str]:
-        """
-        Return the latest assistant reply (string) across all modes.
-        If prefer_order is provided, check those modes first.
-        """
         prefer_order = prefer_order or ["web", "analysis", "data"]
-
-        # 1) Search preferred modes newest→oldest
-        for m in prefer_order:
-            dq = self._buf.get(m)
-            if dq and len(dq):
-                # last tuple is newest: (ts, q, reply)
-                return dq[-1][2]
-
-        # 2) Fallback: newest across all modes by timestamp
-        latest_ts = -1.0
-        latest_reply = None
-        for dq in self._buf.values():
+        latest: Optional[Entry] = None
+        latest_mode: Optional[str] = None
+        for m, dq in self._buf.items():
             if dq:
-                ts, _q, rep = dq[-1]
-                if ts > latest_ts and rep:
-                    latest_ts = ts
-                    latest_reply = rep
-        return latest_reply
-
-    def size(self) -> int:
-        """Total entries across all mode deques (user+assistant pairs counted as 2)."""
-        return sum(len(dq) for dq in self._buf.values())
+                t, q, r = dq[-1]
+                if (latest is None) or (t > latest[0]) or (t == latest[0] and prefer_order.index(m) < prefer_order.index(latest_mode or m)):
+                    latest, latest_mode = (t, q, r), m
+        return latest[2] if latest else None
 
 # ---- intent detection for observation ----
 _OBS_PATTERNS = [
@@ -93,7 +75,7 @@ Rules:
 - Output only Markdown, no preamble.
 
 SOURCE:
-{(source_text or '').strip()}
+{source_text.strip()}
 """
     return llm(prompt, system, 0.2)
 
