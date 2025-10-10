@@ -627,7 +627,7 @@ def ask():
 
     # --------- 2) Logging (unchanged, but safer) ---------
     try:
-    reply_text = ""
+        reply_text = ""
         if isinstance(res, dict):
             reply_text = res.get("reply") or ""
         elif isinstance(res, str):
