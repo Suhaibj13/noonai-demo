@@ -627,9 +627,15 @@ def ask():
 
     # --------- 2) Logging (unchanged, but safer) ---------
     try:
-        history.log(mode, q, (res or {}).get("reply") or "")
-    except Exception:
-        pass
+    reply_text = ""
+        if isinstance(res, dict):
+            reply_text = res.get("reply") or ""
+        elif isinstance(res, str):
+            reply_text = res
+        history.log(mode, q, reply_text)
+    except Exception as e:
+        print("⚠️ history log error:", e)
+    
 
     # --------- 3) Non-breaking extras for debugging/telemetry ---------
     # Frontend can ignore these safely; they do not change existing keys.
