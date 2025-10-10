@@ -227,3 +227,22 @@ button#send[disabled]{ opacity:.6; cursor:not-allowed }
 .sr-only{ position:absolute; left:-9999px; width:1px; height:1px; overflow:hidden }
 .project-select{ width:100%; background:rgba(0,0,0,.18); color:var(--text); border:1px solid var(--border); border-radius:10px; padding:8px 10px; font-size:14px }
 .small-muted{ color:var(--muted); font-size:12px }
+
+/* join UI */
+.join-bar { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+.join-pill {
+  display:inline-flex; align-items:center; gap:.5rem;
+  padding:.25rem .5rem; border:1px solid #ddd; border-radius:999px;
+  font-size:.85rem;
+}
+.join-pill-remove { border:none; background:transparent; cursor:pointer; font-size:.9rem; }
+.join-modal-backdrop {
+  position:fixed; inset:0; background:rgba(0,0,0,.3);
+  display:flex; align-items:center; justify-content:center; z-index:9999;
+}
+.join-modal {
+  width: min(460px, 90vw); background:#fff; border-radius:12px; padding:16px; box-shadow:0 10px 40px rgba(0,0,0,.2);
+}
+.join-modal-title { font-weight:600; margin-bottom:8px; font-size:1.05rem; }
+.join-modal-row { display:flex; flex-direction:column; gap:6px; margin:8px 0; }
+.join-modal-actions { display:flex; justify-content:flex-end; gap:.5rem; margin-top:12px; }
