@@ -497,7 +497,7 @@ def run_analysis_flow(user_query: str,
     wants_reuse = any(p in ql for p in REUSE_PHRASES)
     prev_sql = last_result_sql if wants_reuse else None
 
-    data_res = run_data_flow(user_query, analysis_style=True, previous_sql=prev_sql)
+    data_res = run_data_flow(user_query, analysis_style=True, previous_sql=prev_sql, table_context=table_context)
     if not data_res.get("preview"):
         return data_res
 
@@ -601,8 +601,8 @@ def ask():
                 return safe_json({"ok": True, "mode": mode, "reply": msg})
 
             # LLM adapter (reuse your existing helper)
-            def _llm(prompt: str, system: str = "", temperature: float = 0.2) -> str:
-                return llm_chat(prompt, system=system, temperature=temperature)
+            def _llm(messages, temperature: float = 0.2) -> str:
+                return llm_chat(messages, temperature=temperature)
 
             obs_text = build_observation(_llm, prior_reply)
             history.log("web", q, obs_text)
