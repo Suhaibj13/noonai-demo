@@ -26,16 +26,25 @@ class ConversationHistory:
             return None
         return dq[-1][2] if dq else None
 
-    def latest_reply_any(self, prefer_order: Optional[List[str]] = None) -> Optional[str]:
+    def latest_reply_any(prefer_order=None):
+        """
+        Return the latest assistant reply across all modes (preferring order if provided).
+        """
         prefer_order = prefer_order or ["web", "analysis", "data"]
-        latest: Optional[Entry] = None
-        latest_mode: Optional[str] = None
-        for m, dq in self._buf.items():
-            if dq:
-                t, q, r = dq[-1]
-                if (latest is None) or (t > latest[0]) or (t == latest[0] and prefer_order.index(m) < prefer_order.index(latest_mode or m)):
-                    latest, latest_mode = (t, q, r), m
-        return latest[2] if latest else None
+        if not _store:
+            return None
+    
+        # Search backwards for the latest assistant message by preferred mode order
+        for mode in prefer_order:
+            for msg in reversed(_store):
+                if msg.get("role") == "assistant" and msg.get("mode") == mode:
+                    return msg.get("content") or msg.get("reply")
+        # Fallback to any last assistant message
+        for msg in reversed(_store):
+            if msg.get("role") == "assistant":
+                return msg.get("content") or msg.get("reply")
+        return None
+
 
 # ---- intent detection for observation ----
 _OBS_PATTERNS = [
