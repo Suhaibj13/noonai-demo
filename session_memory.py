@@ -26,25 +26,34 @@ class ConversationHistory:
             return None
         return dq[-1][2] if dq else None
 
-    def latest_reply_any(prefer_order=None):
+    def latest_reply_any(self, prefer_order: Optional[List[str]] = None) -> Optional[str]:
         """
-        Return the latest assistant reply across all modes (preferring order if provided).
+        Return the latest assistant reply (string) across all modes.
+        If prefer_order is provided, check those modes first.
         """
         prefer_order = prefer_order or ["web", "analysis", "data"]
-        if not _store:
-            return None
-    
-        # Search backwards for the latest assistant message by preferred mode order
-        for mode in prefer_order:
-            for msg in reversed(_store):
-                if msg.get("role") == "assistant" and msg.get("mode") == mode:
-                    return msg.get("content") or msg.get("reply")
-        # Fallback to any last assistant message
-        for msg in reversed(_store):
-            if msg.get("role") == "assistant":
-                return msg.get("content") or msg.get("reply")
-        return None
 
+        # 1) Search preferred modes newest→oldest
+        for m in prefer_order:
+            dq = self._buf.get(m)
+            if dq and len(dq):
+                # last tuple is newest: (ts, q, reply)
+                return dq[-1][2]
+
+        # 2) Fallback: newest across all modes by timestamp
+        latest_ts = -1.0
+        latest_reply = None
+        for dq in self._buf.values():
+            if dq:
+                ts, _q, rep = dq[-1]
+                if ts > latest_ts and rep:
+                    latest_ts = ts
+                    latest_reply = rep
+        return latest_reply
+
+    def size(self) -> int:
+        """Total entries across all mode deques (user+assistant pairs counted as 2)."""
+        return sum(len(dq) for dq in self._buf.values())
 
 # ---- intent detection for observation ----
 _OBS_PATTERNS = [
@@ -84,7 +93,7 @@ Rules:
 - Output only Markdown, no preamble.
 
 SOURCE:
-{source_text.strip()}
+{(source_text or '').strip()}
 """
     return llm(prompt, system, 0.2)
 
