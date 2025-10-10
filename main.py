@@ -19,6 +19,10 @@ from analysis_planner import plan_with_groq
 from demo_snapshots import detect_snapshot_card, render_snapshot_answer
 from session_memory import history, wants_observation, build_observation
 
+# === Memory & Observation (ADD) ===
+from memory_ring import MemoryManager, derive_session_id
+import observation as observation_mod  # keeps existing imports intact
+import re
 
 # -----------------------------------------------------------------------------
 # Init
@@ -27,6 +31,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
+
+# === Memory (ADD) ===
+memory = MemoryManager(maxlen=5)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
@@ -546,6 +553,15 @@ def index(): return render_template("index.html")
 @app.get("/health")
 def health(): return "ok", 200
 
+# === Session key helper (ADD) ===
+def _session_id():
+    try:
+        ra = getattr(request, "remote_addr", "") or ""
+        ua = request.headers.get("User-Agent", "") or ""
+    except Exception:
+        ra, ua = "", ""
+    return derive_session_id(ra, ua)
+    
 @app.post("/ask")
 def ask():
     payload = request.get_json(force=True) or {}
@@ -555,58 +571,70 @@ def ask():
     if not q:
         return safe_json({"ok": True, "mode": mode, "reply": "Please type a question."})
 
-    # ---------- Web mode: observation intent + normal web flow (with logging) ----------
+    # --------- 0) Handle 'observation' EARLY (works in ANY mode) ---------
+    # If user asks for an observation, immediately convert the latest reply into a 4-part observation.
+    if wants_observation(q):
+        prior_reply = history.latest_reply_any(prefer_order=["web", "analysis", "data"])
+        if not prior_reply:
+            msg = "I don’t have any prior answer to convert. Ask something first, then say 'create an observation'."
+            try:
+                history.log(mode, q, msg)
+            except Exception:
+                pass
+            return safe_json({
+                "ok": True,
+                "mode": mode,
+                "reply": msg,
+                "context_used": False,
+                "context_size": history.size() if hasattr(history, "size") else None
+            })
+
+        # LLM adapter (reuse your existing helper)
+        def _llm(prompt: str, system: str = "", temperature: float = 0.2) -> str:
+            return llm_chat(prompt, system=system, temperature=temperature)
+
+        obs_text = build_observation(_llm, prior_reply)
+        try:
+            history.log(mode, q, obs_text)
+        except Exception:
+            pass
+        return safe_json({
+            "ok": True,
+            "mode": mode,
+            "reply": obs_text,
+            "context_used": True,
+            "context_size": history.size() if hasattr(history, "size") else None
+        })
+
+    # --------- 1) Normal routing (unchanged logic per mode) ---------
     if mode == "web":
-        # If user asks for an observation, immediately convert the latest reply into a 4-part observation.
-        if wants_observation(q):
-            # Prefer the most recent reply across web → analysis → data
-            prior_reply = history.latest_reply_any(prefer_order=["web", "analysis", "data"])
-            if not prior_reply:
-                msg = "I don’t have any prior answer to convert. Ask something first, then say 'create an observation'."
-                history.log("web", q, msg)
-                return safe_json({"ok": True, "mode": mode, "reply": msg})
-
-            # LLM adapter (reuse your existing helper)
-            def _llm(prompt: str, system: str = "", temperature: float = 0.2) -> str:
-                return llm_chat(prompt, system=system, temperature=temperature)
-
-            obs_text = build_observation(_llm, prior_reply)
-            history.log("web", q, obs_text)
-            return safe_json({"ok": True, "mode": mode, "reply": obs_text})
-
-        # Otherwise: normal web flow
         res = run_web_flow(q)
-        try:
-            history.log("web", q, res.get("reply") or "")
-        except Exception:
-            pass
-        return safe_json(res)
-
-    # ---------- Analysis mode: normal routing + logging ----------
-    if mode == "analysis":
+    elif mode == "analysis":
         res = run_analysis_flow(q)
-        try:
-            history.log("analysis", q, res.get("reply") or "")
-        except Exception:
-            pass
-        return safe_json(res)
-
-    # ---------- Data mode: normal routing + logging ----------
-    if mode == "data":
+    elif mode == "data":
         res = run_data_flow(q, analysis_style=False)
-        try:
-            history.log("data", q, res.get("reply") or "")
-        except Exception:
-            pass
-        return safe_json(res)
+    else:
+        # Fallback to web
+        res = run_web_flow(q)
 
-    # Fallback to web
-    res = run_web_flow(q)
+    # --------- 2) Logging (unchanged, but safer) ---------
     try:
-        history.log("web", q, res.get("reply") or "")
+        history.log(mode, q, (res or {}).get("reply") or "")
     except Exception:
         pass
+
+    # --------- 3) Non-breaking extras for debugging/telemetry ---------
+    # Frontend can ignore these safely; they do not change existing keys.
+    if isinstance(res, dict):
+        res.setdefault("mode", mode)
+        if hasattr(history, "size"):
+            res.setdefault("context_size", history.size())
+        else:
+            res.setdefault("context_size", None)
+        res.setdefault("context_used", False)
+
     return safe_json(res)
+
 
 
     
