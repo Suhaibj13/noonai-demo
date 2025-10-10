@@ -18,6 +18,10 @@ if (!window.fetchJson) {
   };
 }
 
+// ensure these exist even before user touches the dropdown
+window.PROJECT = window.PROJECT || { mainTable: null, joins: [] };
+
+
 const $ = (sel) => document.querySelector(sel);
 const messagesEl = $("#messages");
 const inputEl = $("#input");
@@ -96,10 +100,10 @@ async function send(){
   if (statusEl) statusEl.textContent = "Processing…";
   addTyping();
 
-  try{
+  try {
     const projectTable = (window.PROJECT && window.PROJECT.mainTable) || null;
     const joins        = (window.PROJECT && window.PROJECT.joins) || [];
-
+  
     const res = await fetchJson("/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -110,14 +114,25 @@ async function send(){
         joins           // NEW
       })
     });
+  
     removeTyping();
-    addMessage("ai", String((data.reply ?? "(no reply)")).trim());
+  
+    // ⬇⬇⬇ CHANGE: use `res` (not `data`) and guard errors
+    if (!res || res.error) {
+      addMessage("ai", `Error: ${res?.error || "Unknown error"}`);
+    } else {
+      addMessage("ai", String((res.reply ?? "(no reply)")).trim());
+      if (res.preview) renderPreview(res.preview); // optional, if you have this
+      if (res.sql)     renderSql(res.sql);         // optional, if you have this
+    }
+    // ⬆⬆⬆
+  
     if (statusEl) statusEl.textContent = "Ready";
-  } catch(e){
+  } catch (e) {
     removeTyping();
     addMessage("ai", `Error: ${e.message}`);
     if (statusEl) statusEl.textContent = "Error";
-  } finally{
+  } finally {
     state.sending = false;
     sendBtn.disabled = false;
     scroller().scrollTop = scroller().scrollHeight;
@@ -128,6 +143,7 @@ async function send(){
 async function resetConversation(){
   messagesEl.innerHTML = "";
   try{
+    const q = ""; // <— define q for this request
     const projectTable = (window.PROJECT && window.PROJECT.mainTable) || null;
     const joins        = (window.PROJECT && window.PROJECT.joins) || [];
 
@@ -137,12 +153,14 @@ async function resetConversation(){
       body: JSON.stringify({
         query: q,
         mode: state.mode,
-        projectTable,   // NEW
-        joins           // NEW
+        projectTable,
+        joins
       })
     });
-    addMessage("ai", String((data?.reply ?? "Started a new chat.")).trim());
-  }catch(_){
+
+    // use `res`, not `data`
+    addMessage("ai", String((res?.reply ?? "Started a new chat.")).trim());
+  } catch(_){
     addMessage("ai", "Started a new chat.");
   }
   inputEl.focus();
@@ -169,32 +187,56 @@ window.addEventListener("resize", updateComposerOffset);
 // --- Audit Steps wiring ---
 const projectSel = document.querySelector("#project");
 
-document.querySelectorAll("#audit-steps .rail-btn[data-step]").forEach(btn => {
-  btn.addEventListener("click", async () => {
-    const step = (btn.dataset.step || "").trim(); // rcm | data_request | findings | report
-    if (!step) return;
+// === Auto-send for Audit buttons and chips ===
+document.querySelectorAll("[data-q]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const raw = btn.dataset.q;
+    if (!raw) return;
 
-    const project = projectSel ? projectSel.value : "Inventory Management";
-    addMessage("user", `Run "${step}" for project: ${project}`);
-    if (statusEl) statusEl.textContent = `Running ${step}…`;
+    const q = materializePrompt(raw);
+
+    // show it as if the user typed it
+    addMessage("user", q);
+    inputEl.value = "";
+    sendBtn.disabled = true;
+    state.sending = true;
+    if (statusEl) statusEl.textContent = "Processing…";
     addTyping();
 
-    try {
-      const data = await window.fetchJson("/run_step", {
-        method: "POST",
-        headers: { "Content-Type":"application/json", "Accept":"application/json" },
-        body: JSON.stringify({ step, project })
-      });
+    const projectTable = (window.PROJECT && window.PROJECT.mainTable) || null;
+    const joins        = (window.PROJECT && window.PROJECT.joins) || [];
+
+    window.fetchJson("/ask", {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "Accept":"application/json" },
+      body: JSON.stringify({
+        query: q,
+        mode: state.mode,
+        projectTable,   // NEW
+        joins           // NEW
+      })
+    })
+    .then((res) => {
       removeTyping();
-      addMessage("ai", String((data.reply ?? "(no reply)")).trim());
-      if (statusEl) statusEl.textContent = "Ready";
-    } catch (e) {
+      if (!res || res.error) {
+        addMessage("ai", `Error: ${res?.error || "Unknown error"}`);
+      } else {
+        addMessage("ai", String((res.reply ?? "(no reply)")).trim());
+        if (statusEl) statusEl.textContent = "Ready";
+      }
+    })
+    .catch(e => {
       removeTyping();
       addMessage("ai", `Error: ${e.message}`);
       if (statusEl) statusEl.textContent = "Error";
-    }
+    })
+    .finally(() => {
+      state.sending = false;
+      sendBtn.disabled = false;
+    });
   });
 });
+
 
 // ===========================
 // Project-aware presets
