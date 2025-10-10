@@ -97,10 +97,18 @@ async function send(){
   addTyping();
 
   try{
-    const data = await window.fetchJson("/ask", {
+    const projectTable = (window.PROJECT && window.PROJECT.mainTable) || null;
+    const joins        = (window.PROJECT && window.PROJECT.joins) || [];
+
+    const res = await fetchJson("/ask", {
       method: "POST",
-      headers: { "Content-Type":"application/json", "Accept":"application/json" },
-      body: JSON.stringify({ query: q, mode: state.mode })
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: q,
+        mode: state.mode,
+        projectTable,   // NEW
+        joins           // NEW
+      })
     });
     removeTyping();
     addMessage("ai", String((data.reply ?? "(no reply)")).trim());
@@ -120,10 +128,18 @@ async function send(){
 async function resetConversation(){
   messagesEl.innerHTML = "";
   try{
-    const data = await window.fetchJson("/ask", {
+    const projectTable = (window.PROJECT && window.PROJECT.mainTable) || null;
+    const joins        = (window.PROJECT && window.PROJECT.joins) || [];
+
+    const res = await fetchJson("/ask", {
       method: "POST",
-      headers: { "Content-Type":"application/json", "Accept":"application/json" },
-      body: JSON.stringify({ query: "reset", mode: state.mode })
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: q,
+        mode: state.mode,
+        projectTable,   // NEW
+        joins           // NEW
+      })
     });
     addMessage("ai", String((data?.reply ?? "Started a new chat.")).trim());
   }catch(_){
