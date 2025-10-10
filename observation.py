@@ -43,3 +43,32 @@ ANALYSIS (source for facts and findings):
 {analysis_text.strip()}
 """
     return llm(prompt, system, 0.2)
+
+# ---- ADD THIS AT THE END OF observation.py ----
+def build_observation_from_text(source_text: str, extra_meta: dict | None = None) -> dict:
+    """
+    Safe wrapper that builds an observation purely from provided text.
+    Keeps existing module API intact and avoids any dependency on shared/global state.
+    """
+    extra_meta = extra_meta or {}
+    if not source_text or not source_text.strip():
+        return {
+            "ok": False,
+            "reply": "No source content found to create an observation.",
+            "observation": None
+        }
+
+    # If you already have a core builder function, re-use it here.
+    # Example: return build_observation(source_text=source_text, meta=extra_meta)
+    # Fallback minimal structure:
+    observation = {
+        "title": "Observation from previous analysis",
+        "summary": source_text.strip()[:1000],
+        "details": source_text.strip(),
+        "meta": extra_meta
+    }
+    return {
+        "ok": True,
+        "reply": "Created observation from the previous answer.",
+        "observation": observation
+    }
