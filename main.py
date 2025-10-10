@@ -18,6 +18,7 @@ from pandas.api.types import (
 from analysis_planner import plan_with_groq
 from demo_snapshots import detect_snapshot_card, render_snapshot_answer
 from session_memory import history, wants_observation, build_observation
+from observation import generate_observation
 
 
 # -----------------------------------------------------------------------------
@@ -601,10 +602,16 @@ def ask():
                 return safe_json({"ok": True, "mode": mode, "reply": msg})
 
             # LLM adapter (reuse your existing helper)
-            def _llm(messages, temperature: float = 0.2) -> str:
+            def _llm(prompt: str, system: str = "", temperature: float = 0.2) -> str:
+                # example: if your llm_chat wants messages, compose them here
+                messages = [
+                    {"role": "system", "content": system or ""},
+                    {"role": "user", "content": prompt}
+                ]
                 return llm_chat(messages, temperature=temperature)
 
-            obs_text = build_observation(_llm, prior_reply)
+            # AFTER (Markdown with Background/Observation/Risk/Recommendation)
+            obs_text = generate_observation(_llm, background="", analysis_text=prior_reply)
             history.log("web", q, obs_text)
             return safe_json({"ok": True, "mode": mode, "reply": obs_text})
 
