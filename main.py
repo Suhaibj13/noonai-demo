@@ -574,6 +574,7 @@ def ask():
     payload = request.get_json(force=True) or {}
     q    = (payload.get("q") or payload.get("query") or "").strip()
     mode = (payload.get("mode") or "web").lower()
+    prior_reply = (payload.get("priorReply") or "").strip()  # NEW
 
     # NEW: project context coming from frontend (safe if absent)
     project_table = payload.get("projectTable") or None
@@ -594,24 +595,23 @@ def ask():
     if mode == "web":
         # If user asks for an observation, immediately convert the latest reply into a 4-part observation.
         if wants_observation(q):
-            # Prefer the most recent reply across web → analysis → data
-            prior_reply = history.latest_reply_any(prefer_order=["web", "analysis", "data"])
-            if not prior_reply:
+            # Prefer the prior reply sent by the frontend; otherwise fall back to server history
+            source_text = prior_reply or (history.latest_reply_any(prefer_order=["web", "analysis", "data"]) or "")
+            if not source_text:
                 msg = "I don’t have any prior answer to convert. Ask something first, then say 'create an observation'."
                 history.log("web", q, msg)
                 return safe_json({"ok": True, "mode": mode, "reply": msg})
-
+    
             # LLM adapter (reuse your existing helper)
             def _llm(prompt: str, system: str = "", temperature: float = 0.2) -> str:
-                # example: if your llm_chat wants messages, compose them here
                 messages = [
                     {"role": "system", "content": system or ""},
                     {"role": "user", "content": prompt}
                 ]
                 return llm_chat(messages, temperature=temperature)
-
-            # AFTER (Markdown with Background/Observation/Risk/Recommendation)
-            obs_text = generate_observation(_llm, background="", analysis_text=prior_reply)
+    
+            # Generate Markdown with Background/Observation/Risk/Recommendation
+            obs_text = generate_observation(_llm, background="", analysis_text=source_text)
             history.log("web", q, obs_text)
             return safe_json({"ok": True, "mode": mode, "reply": obs_text})
 
