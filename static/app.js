@@ -20,6 +20,7 @@ if (!window.fetchJson) {
 
 // ensure these exist even before user touches the dropdown
 window.PROJECT = window.PROJECT || { mainTable: null, joins: [] };
+window.LAST_AI_REPLY = "";
 
 
 const $ = (sel) => document.querySelector(sel);
@@ -119,6 +120,7 @@ async function send(){
         mode: state.mode,
         projectTable,   // NEW
         joins           // NEW
+        priorReply: window.LAST_AI_REPLY || ""     // NEW
       })
     });
   
@@ -129,6 +131,14 @@ async function send(){
       addMessage("ai", `Error: ${res?.error || "Unknown error"}`);
     } else {
       addMessage("ai", String((res.reply ?? "(no reply)")).trim());
+      // B — store last reply
+      if (res && typeof res.reply === "string") {
+        window.LAST_AI_REPLY = res.reply;
+      }
+      
+      if (res && res.preview && typeof window.renderPreview === "function") {
+        window.renderPreview(res.preview);
+      }
       if (res && res.preview && typeof window.renderPreview === "function") {
         window.renderPreview(res.preview);
       }
@@ -153,6 +163,7 @@ async function send(){
 // Reset conversation (posts "reset" via /ask)
 async function resetConversation(){
   messagesEl.innerHTML = "";
+  window.LAST_AI_REPLY = ""; 
   try{
     const q = ""; // <— define q for this request
     const projectTable = (window.PROJECT && window.PROJECT.mainTable) || null;
@@ -166,6 +177,7 @@ async function resetConversation(){
         mode: state.mode,
         projectTable,
         joins
+        priorReply: window.LAST_AI_REPLY || ""     // NEW
       })
     });
 
@@ -233,6 +245,11 @@ document.querySelectorAll("[data-q]").forEach(btn => {
         addMessage("ai", `Error: ${res?.error || "Unknown error"}`);
       } else {
         addMessage("ai", String((res.reply ?? "(no reply)")).trim());
+
+        // B — store last reply
+        if (res && typeof res.reply === "string") {
+          window.LAST_AI_REPLY = res.reply;
+        }
     
         // ⬇⬇⬇ 2nd point goes here (guarded preview/SQL renderers)
         if (res && res.preview && typeof window.renderPreview === "function") {
