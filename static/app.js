@@ -119,7 +119,7 @@ async function send(){
         query: q,
         mode: state.mode,
         projectTable,   // NEW
-        joins           // NEW
+        joins,           // NEW
         priorReply: window.LAST_AI_REPLY || ""     // NEW
       })
     });
@@ -136,9 +136,6 @@ async function send(){
         window.LAST_AI_REPLY = res.reply;
       }
       
-      if (res && res.preview && typeof window.renderPreview === "function") {
-        window.renderPreview(res.preview);
-      }
       if (res && res.preview && typeof window.renderPreview === "function") {
         window.renderPreview(res.preview);
       }
@@ -176,7 +173,7 @@ async function resetConversation(){
         query: q,
         mode: state.mode,
         projectTable,
-        joins
+        joins,
         priorReply: window.LAST_AI_REPLY || ""     // NEW
       })
     });
