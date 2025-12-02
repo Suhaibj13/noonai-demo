@@ -95,6 +95,30 @@ function updateComposerOffset(){
   scroller().scrollTop = scroller().scrollHeight;
 }
 
+// Render a preview table under the most recent AI bubble
+window.renderPreview = function(previewText, previewHtml) {
+  const bubbleEl = document.querySelector("#messages .msg-ai:last-of-type .bubble");
+  if (!bubbleEl) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "data-preview";
+
+  if (previewHtml) {
+    // Backend already escaped + wrapped in <pre class="data-table">…</pre>
+    wrap.innerHTML = previewHtml;
+  } else if (previewText) {
+    const pre = document.createElement("pre");
+    pre.className = "data-table";
+    pre.textContent = previewText;        // plain-text fallback
+    wrap.appendChild(pre);
+  } else {
+    return;
+  }
+
+  bubbleEl.appendChild(wrap);
+  scroller().scrollTop = scroller().scrollHeight;
+};
+
 // Send handler (uses /ask)
 async function send(){
   const q = (inputEl.value || "").trim();
@@ -136,8 +160,9 @@ async function send(){
         window.LAST_AI_REPLY = res.reply;
       }
       
-      if (res && res.preview && typeof window.renderPreview === "function") {
-        window.renderPreview(res.preview);
+    if (typeof window.renderPreview === "function" && (res.preview_html || res.preview)) {
+      window.renderPreview(res.preview, res.preview_html);
+    }
       }
       if (res && res.sql && typeof window.renderSql === "function") {
         window.renderSql(res.sql);
