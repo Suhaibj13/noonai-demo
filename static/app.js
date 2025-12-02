@@ -177,6 +177,7 @@ async function send(){
     sendBtn.disabled = false;
     scroller().scrollTop = scroller().scrollHeight;
   }
+}
 
 // Reset conversation (posts "reset" via /ask)
 async function resetConversation(){
@@ -187,7 +188,7 @@ async function resetConversation(){
     const projectTable = (window.PROJECT && window.PROJECT.mainTable) || null;
     const joins        = (window.PROJECT && window.PROJECT.joins) || [];
 
-    const res = await fetchJson("/ask", {
+    const res = await window.fetchJson("/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
