@@ -19,6 +19,8 @@ from analysis_planner import plan_with_groq
 from demo_snapshots import detect_snapshot_card, render_snapshot_answer
 from session_memory import history, wants_observation, build_observation
 from observation import generate_observation
+from demo_intents import get_demo_response  # NEW
+
 
 
 # -----------------------------------------------------------------------------
