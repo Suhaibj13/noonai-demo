@@ -1,210 +1,215 @@
 # demo_intents.py
-# Demo answers driven by your real CSVs (first 1,000 rows).
-# Intercepts a few exact questions per mode.
 from __future__ import annotations
-import os, re
-from typing import Any, Dict, Callable, Tuple, Optional
-import pandas as pd
-
-# ---------- load & normalize ---------------------------------------------------
-_DEMO_CACHE: Dict[str, pd.DataFrame] = {}
-
-def _read_head(fname: str, n: int = 1000) -> pd.DataFrame:
-    if fname in _DEMO_CACHE:
-        return _DEMO_CACHE[fname]
-    if not os.path.exists(fname):
-        _DEMO_CACHE[fname] = pd.DataFrame()
-        return _DEMO_CACHE[fname]
-    df = pd.read_csv(fname).head(n).copy()
-    # best-effort parse common date columns
-    for c in df.columns:
-        cl = c.lower()
-        if "date" in cl or "created" in cl or "time" in cl or "sold" in cl or "delivered" in cl:
-            try:
-                df[c] = pd.to_datetime(df[c], errors="ignore")
-            except Exception:
-                pass
-    _DEMO_CACHE[fname] = df
-    return df
-
-def _orders() -> pd.DataFrame:   return _read_head("orders.csv")
-def _inventory() -> pd.DataFrame:return _read_head("inventory.csv")
-def _mg() -> pd.DataFrame:       return _read_head("minimum_guarantee.csv")
+from typing import Any, Dict
 
 def _norm(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
 
-def _df_preview_string(df: pd.DataFrame, rows: int = 50) -> str:
-    if df is None or df.empty:
-        return "(no rows)"
-    try:
-        return df.head(rows).to_string(index=False)
-    except Exception:
-        return str(df.head(rows))
+DEMO: Dict[str, Dict[str, Dict[str, Any]]] = {
+    # ---------------- DATA MODE (table preview only; NO SQL) ----------------
+    "data": {
+        _norm("Give me total purchase for each customer"): {
+            "reply": "Executed SQL. Showing first 50 rows.",
+            "sql": "",
+            "preview": """customer_id, total_purchase
+30048.0, 1,809.94
+13219.0, 1,782.99
+95674.0, 1,744.40
+11361.0, 1,448.44
+98530.0, 1,412.45
+34572.0, 1,411.18
+54985.0, 1,385.66
+73335.0, 1,384.49
+32056.0, 1,370.77
+85693.0, 1,367.70
+52491.0, 1,355.78
+4852.0, 1,343.99
+12793.0, 1,334.43
+24843.0, 1,332.99
+70463.0, 1,303.72
+996.0, 1,300.94
+29231.0, 1,298.89
+13324.0, 1,293.85
+72159.0, 1,285.90
+87816.0, 1,275.94
+61075.0, 1,270.23
+80358.0, 1,259.88
+99658.0, 1,258.32
+68077.0, 1,257.95
+17424.0, 1,256.61
+37259.0, 1,250.75
+70557.0, 1,247.96
+39984.0, 1,246.53
+87283.0, 1,245.57
+88192.0, 1,245.20
+15319.0, 1,240.80
+22351.0, 1,240.23
+32861.0, 1,237.69
+32048.0, 1,235.39
+47186.0, 1,232.44
+46329.0, 1,229.66
+64286.0, 1,226.77
+96310.0, 1,225.19
+72177.0, 1,224.18
+87692.0, 1,222.76
+40410.0, 1,219.30
+78925.0, 1,219.17
+81334.0, 1,219.02
+81832.0, 1,218.41
+75384.0, 1,217.61
+39444.0, 1,214.31
+60703.0, 1,214.28
+27403.0, 1,197.98
+54671.0, 1,192.93
+40926.0, 1,191.89
+26672.0, 1,191.34
+27232.0, 1,173.67
+16613.0, 1,172.95
+96911.0, 1,170.95
+30480.0, 1,170.43
+79239.0, 1,170.00
+73020.0, 1,169.90
+66745.0, 1,168.99
+69710.0, 1,159.11
+97402.0, 1,158.75
+57700.0, 1,158.14"""
+        },
 
-# ---------- light column sniffers ---------------------------------------------
-def _find_col(df: pd.DataFrame, *cands: str, numeric: bool | None = None) -> Optional[str]:
-    if df is None or df.empty:
-        return None
-    cols = list(df.columns)
-    # first pass: name contains any candidate
-    for name in cols:
-        nm = name.lower()
-        if any(k in nm for k in cands):
-            if numeric is True and not pd.api.types.is_numeric_dtype(df[name]): 
-                continue
-            if numeric is False and pd.api.types.is_numeric_dtype(df[name]): 
-                continue
-            return name
-    # fallback: exact lowercase match
-    for name in cols:
-        if name.lower() in cands:
-            return name
-    return None
+        _norm("Show total orders by day"): {
+            "reply": "Executed SQL. Showing first 50 rows.",
+            "sql": "",
+            "preview": """date, total_orders, revenue
+2019-01-09, 1.00, 83.76
+2019-01-10, 1.00, 55.00
+2019-01-13, 2.00, 437.48
+2019-01-16, 2.00, 137.20
+2019-01-20, 2.00, 121.55
+2019-01-22, 1.00, 61.77
+2019-01-24, 2.00, 180.26
+2019-01-25, 2.00, 153.24
+2019-01-27, 2.00, 182.50
+2019-01-28, 1.00, 25.69
+2019-01-29, 2.00, 148.96
+2019-01-30, 1.00, 68.65
+2019-01-31, 3.00, 173.56
+2019-02-02, 2.00, 86.38
+2019-02-03, 2.00, 173.46
+2019-02-04, 1.00, 61.80
+2019-02-05, 2.00, 300.64
+2019-02-06, 2.00, 86.59
+2019-02-07, 2.00, 132.51
+2019-02-08, 2.00, 86.86
+2019-02-09, 1.00, 93.37
+2019-02-10, 2.00, 103.35
+2019-02-11, 2.00, 180.75
+2019-02-12, 1.00, 49.99
+2019-02-13, 1.00, 59.73
+2019-02-14, 2.00, 119.75
+2019-02-15, 1.00, 68.15
+2019-02-16, 2.00, 160.65
+2019-02-17, 1.00, 68.17
+2019-02-18, 2.00, 90.96
+2019-02-19, 1.00, 49.99
+2019-02-20, 2.00, 180.35
+2019-02-21, 2.00, 79.98
+2019-02-22, 2.00, 168.64
+2019-02-23, 1.00, 49.99
+2019-02-24, 2.00, 210.45
+2019-02-25, 2.00, 148.16
+2019-02-26, 2.00, 185.09
+2019-02-27, 1.00, 49.99
+2019-02-28, 1.00, 68.50
+2019-03-01, 3.00, 126.95
+2019-03-02, 2.00, 103.34
+2019-03-03, 2.00, 119.48
+2019-03-04, 2.00, 147.13
+2019-03-05, 2.00, 99.33
+2019-03-06, 2.00, 164.48
+2019-03-07, 2.00, 104.03
+2019-03-08, 1.00, 49.99
+2019-03-09, 2.00, 119.68
+2019-03-10, 1.00, 49.99"""
+        },
 
-# ---------- DATA mode demos (return preview only) -----------------------------
-def _data_show(df: pd.DataFrame) -> Dict[str, Any]:
-    preview = _df_preview_string(df, 50)
-    return {
-        "reply": f"Executed SQL. Showing first {min(50, len(df)) if df is not None else 0} rows.",
-        "sql": "",                # intentionally blank for demo
-        "preview": preview,
-    }
+        _norm("Top 5 sku by revenue"): {
+            "reply": "Executed SQL. Showing first 5 rows.",
+            "sql": "",
+            "preview": """sku, revenue
+23546.0, 11,988.00
+24447.0, 10,989.00
+24314.0, 9,750.00
+23803.0, 8,150.00
+23989.0, 8,127.00"""
+        },
 
-DATA_DEMOS: Dict[str, Callable[[], Dict[str, Any]]] = {
-    _norm("Give me total purchase for each customer"):       lambda: _data_show(_orders()),
-    _norm("Show total orders by day"):                       lambda: _data_show(_orders()),
-    _norm("Top 5 sku by revenue"):                           lambda: _data_show(_orders()),
-    _norm("Compare orders first half vs second half of month"): lambda: _data_show(_orders()),
-    _norm("Show minimum guarantee payout by vendor"):        lambda: _data_show(_mg()),
-    # You can add synonyms like:
-    _norm("show orders table"):                              lambda: _data_show(_orders()),
-    _norm("show inventory table"):                           lambda: _data_show(_inventory()),
-    _norm("show minimum guarantee table"):                   lambda: _data_show(_mg()),
+        _norm("Compare orders first half vs second half of month"): {
+            "reply": "Executed SQL. Showing first 2 rows.",
+            "sql": "",
+            "preview": """period, total_orders, revenue
+First half, 65,440.00, 5,444,105.42
+Second half, 64,000.00, 5,331,184.89"""
+        },
+
+        _norm("Show minimum guarantee payout by vendor"): {
+            "reply": "Executed SQL. Showing first 10 rows.",
+            "sql": "",
+            "preview": """vendor, mg_amount, payout, total_payout
+Desert Riders, 7,187,855.00, 5,796,462.00, 12,984,317.00
+Swift Hands, 7,085,978.00, 5,804,119.00, 12,890,097.00
+Rapid Wheels, 7,068,874.00, 5,828,847.00, 12,897,721.00
+First Company, 7,046,980.00, 5,793,164.00, 12,840,144.00
+Falcon Express, 6,886,804.00, 5,566,694.00, 12,453,498.00
+Tiger Delivery, 6,826,018.00, 5,753,096.00, 12,579,114.00
+Alpha Logistics, 6,677,602.00, 5,792,685.00, 12,470,287.00
+Station Express, 6,665,148.00, 5,672,368.00, 12,337,516.00
+Camel Couriers, 6,528,785.00, 5,629,083.00, 12,157,868.00
+Green Wheels, 6,441,440.00, 5,529,171.00, 11,970,611.00"""
+        },
+    },
+
+    # ---------------- ANALYSIS MODE (numbers + short insights) ----------------
+    "analysis": {
+        _norm("What is total revenue and average order value?"): {
+            "reply": """Answer: total revenue = 10,775,290.30, AOV = 86.35 (over 124,792 orders).
+- Customer concentration: top 10% customers drive 33.78% of revenue; top 1% drive 6.38%.
+- Loyalty effect: ~59.95% of revenue comes from returning customers."""
+        },
+
+        _norm("First vs second half of month — orders and revenue"): {
+            "reply": """Answer: Orders — First half = 65,440, Second half = 64,000 (-2.20% change). Revenue — First half = 5,444,105.42, Second half = 5,331,184.89 (-2.07%). AOV — First half = 83.19, Second half = 83.30 (+0.13%).
+- Insight: demand softens slightly in the second half, while value per order stays broadly stable."""
+        },
+        _norm("First vs second half of month - orders and revenue"): {
+            "reply": """Answer: Orders — First half = 65,440, Second half = 64,000 (-2.20% change). Revenue — First half = 5,444,105.42, Second half = 5,331,184.89 (-2.07%). AOV — First half = 83.19, Second half = 83.30 (+0.13%).
+- Insight: demand softens slightly in the second half, while value per order stays broadly stable."""
+        },
+
+        _norm("Top 5 SKUs by revenue and % share"): {
+            "reply": """Answer: top-5 SKUs contribute 0.45% of revenue; top-20 = 1.42% across 29,044 SKUs.
+- Top SKU 23546 revenue = 11,988.00. Revenue is highly long-tailed (no heavy concentration at SKU level)."""
+        },
+
+        _norm("Minimum guarantee utilization summary"): {
+            "reply": """Answer: MG utilization = 83.56% (committed 68,415,484 vs paid 57,165,689). Median vendor utilization = 83.37%.
+- Lowest utilization vendors:
+  - Desert Riders: 80.64%
+  - Falcon Express: 80.83%
+  - Swift Hands: 81.91%
+- Highest (still <90%):
+  - Alpha Logistics: 86.75%
+  - Camel Couriers: 86.22%
+  - Green Wheels: 85.84%
+- Distribution: 6 vendors <85% util, 4 vendors 85–90%, 0 vendors ≥90%."""
+        },
+
+        _norm("Inventory health summary"): {
+            "reply": """Answer: 29,044 unique SKUs across 487,669 inventory items.
+- Sell-through: 37.01% sold (180,505 items), 307,164 still unsold.
+- Pricing: avg cost 28.72, avg retail 59.72, avg unit margin 31.00 (avg gross margin ≈ 51.06%).
+- Brand mix: top 5 brands (Allegra K, Calvin Klein, Carhartt, Hanes, Volcom) represent 8.81% of inventory; total brands 2,754."""
+        },
+    },
 }
 
-# ---------- ANALYSIS mode demos (compute numbers) -----------------------------
-def _fmt_num(x) -> str:
-    try:
-        return f"{float(x):,.2f}" if abs(float(x) - int(float(x))) > 1e-9 else f"{int(float(x)):,}"
-    except Exception:
-        return str(x)
-
-def _analysis_orders_totals() -> Dict[str, Any]:
-    df = _orders()
-    if df is None or df.empty:
-        return {"reply": "I couldn't compute this from the demo rows.", "sql": None, "preview": None}
-
-    val_col = _find_col(df, "order_value", "amount", "price", "revenue", "total")
-    if not val_col:
-        return {"reply": "I couldn't compute totals (no amount/price column found).", "sql": None, "preview": _df_preview_string(df)}
-
-    n_orders = len(df)
-    total_rev = df[val_col].fillna(0).astype(float).sum()
-    aov = total_rev / n_orders if n_orders else 0
-
-    reply = (
-        f"Answer: total revenue = { _fmt_num(total_rev) }, AOV = { _fmt_num(aov) } "
-        f"(over { _fmt_num(n_orders) } orders).\n"
-        "- Topline looks at first 1,000 demo rows only.\n"
-        "- Use Data mode for full detail.\n"
-    )
-    return {"reply": reply, "sql": None, "preview": _df_preview_string(df)}
-
-def _analysis_first_vs_second_half() -> Dict[str, Any]:
-    df = _orders()
-    if df is None or df.empty:
-        return {"reply": "I couldn't compute this from the demo rows.", "sql": None, "preview": None}
-    date_col = _find_col(df, "date", "order_date", "created", "time")
-    val_col  = _find_col(df, "order_value", "amount", "price", "revenue", "total")
-    if not date_col:
-        return {"reply": "I couldn't find a date column for the split.", "sql": None, "preview": _df_preview_string(df)}
-    tmp = df[[date_col]].copy()
-    tmp["__day"] = pd.to_datetime(df[date_col], errors="coerce").dt.day
-    tmp["__period"] = tmp["__day"].apply(lambda d: "First half" if pd.notna(d) and d <= 15 else "Second half")
-    if val_col:
-        tmp["__val"] = pd.to_numeric(df[val_col], errors="coerce")
-    g = tmp.groupby("__period", dropna=False)
-    cnt = g["__day"].count()
-    rev = g["__val"].sum() if "__val" in tmp else None
-
-    reply = f"Answer: orders — First half = { _fmt_num(cnt.get('First half',0)) }, Second half = { _fmt_num(cnt.get('Second half',0)) }."
-    if rev is not None:
-        reply += f" Revenue — First half = { _fmt_num(rev.get('First half',0)) }, Second half = { _fmt_num(rev.get('Second half',0)) }."
-    reply += "\n- Split computed on first 1,000 demo rows."
-    return {"reply": reply, "sql": None, "preview": _df_preview_string(df)}
-
-def _analysis_top5_sku_share() -> Dict[str, Any]:
-    df = _orders()
-    if df is None or df.empty:
-        return {"reply": "I couldn't compute this from the demo rows.", "sql": None, "preview": None}
-    sku_col = _find_col(df, "sku", "sku_id", "product", "product_id", "item_id")
-    val_col = _find_col(df, "order_value", "amount", "price", "revenue", "total")
-    if not (sku_col and val_col):
-        return {"reply": "I couldn't find SKU and value columns.", "sql": None, "preview": _df_preview_string(df)}
-    g = df.groupby(sku_col, dropna=False)[val_col].sum().sort_values(ascending=False)
-    top5 = g.head(5)
-    share = (top5.sum() / g.sum()) * 100 if g.sum() else 0.0
-    reply = (
-        f"Answer: top-5 SKU revenue share = { _fmt_num(share) }%.\n"
-        f"- Top SKU: { top5.index[0] if len(top5) else 'n/a' } with { _fmt_num(top5.iloc[0] if len(top5) else 0) }.\n"
-        f"- Total SKUs in demo: { _fmt_num(g.shape[0]) }."
-    )
-    return {"reply": reply, "sql": None, "preview": _df_preview_string(df)}
-
-def _analysis_mg_utilization() -> Dict[str, Any]:
-    df = _mg()
-    if df is None or df.empty:
-        return {"reply": "I couldn't compute this from the demo rows.", "sql": None, "preview": None}
-    mg_amt   = _find_col(df, "mg", "mg_amount", "minimum", "guarantee", "committed")
-    payout   = _find_col(df, "payout", "actual_payout", "paid", "disbursed")
-    if not (mg_amt and payout):
-        return {"reply": "I couldn't find MG amount and payout columns.", "sql": None, "preview": _df_preview_string(df)}
-    total_mg  = pd.to_numeric(df[mg_amt], errors="coerce").fillna(0).sum()
-    total_pay = pd.to_numeric(df[payout], errors="coerce").fillna(0).sum()
-    util = (total_pay / total_mg * 100) if total_mg else 0.0
-    reply = (
-        f"Answer: MG utilization = { _fmt_num(util) }% "
-        f"(committed { _fmt_num(total_mg) } vs paid { _fmt_num(total_pay) }).\n"
-        "- Computed on first 1,000 demo rows."
-    )
-    return {"reply": reply, "sql": None, "preview": _df_preview_string(df)}
-
-def _analysis_inventory_health() -> Dict[str, Any]:
-    df = _inventory()
-    if df is None or df.empty:
-        return {"reply": "I couldn't compute this from the demo rows.", "sql": None, "preview": None}
-    qty_col = _find_col(df, "qty", "quantity", "stock", "on_hand", "onhand", "available", numeric=True)
-    sku_col = _find_col(df, "sku", "sku_id", "product", "product_id", "item_id")
-    total_skus = df[sku_col].nunique() if sku_col else len(df)
-    avg_stock = pd.to_numeric(df[qty_col], errors="coerce").mean() if qty_col else None
-    stockouts = int((pd.to_numeric(df[qty_col], errors="coerce") <= 0).sum()) if qty_col else None
-    reply = f"Answer: total SKUs = { _fmt_num(total_skus) }"
-    if avg_stock is not None:
-        reply += f", average stock = { _fmt_num(avg_stock) }"
-    if stockouts is not None:
-        reply += f", stock-outs = { _fmt_num(stockouts) }"
-    reply += ".\n- Based on first 1,000 demo rows."
-    return {"reply": reply, "sql": None, "preview": _df_preview_string(df)}
-
-ANALYSIS_DEMOS: Dict[str, Callable[[], Dict[str, Any]]] = {
-    _norm("What is total revenue and average order value?"): _analysis_orders_totals,
-    _norm("First vs second half of month — orders and revenue"): _analysis_first_vs_second_half,
-    _norm("Top 5 SKUs by revenue and % share"): _analysis_top5_sku_share,
-    _norm("Minimum guarantee utilization summary"): _analysis_mg_utilization,
-    _norm("Inventory health summary"): _analysis_inventory_health,
-    # Simple ASCII variant of the en-dash:
-    _norm("First vs second half of month - orders and revenue"): _analysis_first_vs_second_half,
-}
-
-# ---------- public entry ------------------------------------------------------
 def get_demo_response(mode: str, user_input: str) -> Dict[str, Any] | None:
-    key = _norm(user_input)
-    m = (mode or "").strip().lower()
-    if m == "data":
-        fn = DATA_DEMOS.get(key)
-        return fn() if fn else None
-    if m == "analysis":
-        fn = ANALYSIS_DEMOS.get(key)
-        return fn() if fn else None
-    return None
+    return DEMO.get((mode or "").lower(), {}).get(_norm(user_input))
