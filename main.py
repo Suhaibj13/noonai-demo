@@ -20,6 +20,7 @@ from demo_snapshots import detect_snapshot_card, render_snapshot_answer
 from session_memory import history, wants_observation, build_observation
 from observation import generate_observation
 from demo_intents import get_demo_response  # NEW
+import html  # NEW
 
 
 
@@ -91,6 +92,13 @@ def pre_analyze(df: pd.DataFrame) -> Dict:
     if df is None or df.empty: return {"rows":0, "cols":0}
     numeric = df.select_dtypes(include="number").columns.tolist()
     return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "numeric_cols": numeric[:10]}
+
+def preview_as_html(preview_text: str) -> str:
+    """Wrap plain-text preview in a <pre> so the UI can show a table-like block."""
+    if not preview_text:
+        return ""
+    return f"<pre class='data-table'>{html.escape(preview_text)}</pre>"
+
 
 # -----------------------------------------------------------------------------
 # Data loading
@@ -406,10 +414,12 @@ def run_data_flow(question: str,
                 return {"reply": msg, "sql": sql_try, "preview": None}
 
     last_result_df, last_result_sql, last_result_query = df, sql_try, question
+    preview_txt = trim_text(df_preview_string(df), 2000)
     return {
         "reply": f"Executed SQL. Showing first {min(50, len(df))} rows.",
         "sql": sql_try,
-        "preview": trim_text(df_preview_string(df), 2000),
+        "preview": preview_txt,
+        "preview_html": preview_as_html(preview_txt),  # NEW
     }
 
 # -----------------------------------------------------------------------------
@@ -577,12 +587,18 @@ def ask():
     q    = (payload.get("q") or payload.get("query") or "").strip()
     mode = (payload.get("mode") or "web").lower()
     # DEMO INTERCEPT: only for data/analysis; web stays live
+    # DEMO INTERCEPT: only for data/analysis; web stays live
     if mode in ("data", "analysis"):
         demo = get_demo_response(mode, q)
         if demo:
+            logging.info("DEMO HIT → mode=%s | q=%s", mode, q)  # NEW: confirm in Render logs
             demo["mode"] = mode
-            demo.setdefault("sql", "")        # keep UI consistent (no SQL shown)
+            demo.setdefault("sql", "")  # keep UI consistent (no SQL shown)
+            # Provide HTML version so the UI actually renders the table
+            if demo.get("preview") and "preview_html" not in demo:
+                demo["preview_html"] = preview_as_html(demo["preview"])  # NEW
             return safe_json(demo)
+
     prior_reply = (payload.get("priorReply") or "").strip()  # NEW
 
     # NEW: project context coming from frontend (safe if absent)
