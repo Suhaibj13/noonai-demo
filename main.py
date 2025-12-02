@@ -574,6 +574,13 @@ def ask():
     payload = request.get_json(force=True) or {}
     q    = (payload.get("q") or payload.get("query") or "").strip()
     mode = (payload.get("mode") or "web").lower()
+    # DEMO INTERCEPT: only for data/analysis; web stays live
+    if mode in ("data", "analysis"):
+        demo = get_demo_response(mode, q)
+        if demo:
+            demo["mode"] = mode
+            demo.setdefault("sql", "")        # keep UI consistent (no SQL shown)
+            return safe_json(demo)
     prior_reply = (payload.get("priorReply") or "").strip()  # NEW
 
     # NEW: project context coming from frontend (safe if absent)
