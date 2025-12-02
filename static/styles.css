@@ -246,3 +246,24 @@ button#send[disabled]{ opacity:.6; cursor:not-allowed }
 .join-modal-title { font-weight:600; margin-bottom:8px; font-size:1.05rem; }
 .join-modal-row { display:flex; flex-direction:column; gap:6px; margin:8px 0; }
 .join-modal-actions { display:flex; justify-content:flex-end; gap:.5rem; margin-top:12px; }
+
+/* Data preview under AI bubbles */
+.data-preview { 
+  margin-top: 8px; 
+  overflow-x: auto; 
+}
+
+.data-table {
+  display: block;
+  white-space: pre;              /* keep table alignment */
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  background: rgba(255,255,255,0.86);
+  color: #111;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.06) inset;
+}
