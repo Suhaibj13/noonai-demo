@@ -136,39 +136,36 @@ async function send(){
     const projectTable = (window.PROJECT && window.PROJECT.mainTable) || null;
     const joins        = (window.PROJECT && window.PROJECT.joins) || [];
   
-    const res = await fetchJson("/ask", {
+    const res = await window.fetchJson("/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         query: q,
         mode: state.mode,
-        projectTable,   // NEW
-        joins,           // NEW
-        priorReply: window.LAST_AI_REPLY || ""     // NEW
+        projectTable,
+        joins,
+        priorReply: window.LAST_AI_REPLY || ""
       })
     });
   
     removeTyping();
   
-    // ⬇⬇⬇ CHANGE: use `res` (not `data`) and guard errors
     if (!res || res.error) {
       addMessage("ai", `Error: ${res?.error || "Unknown error"}`);
     } else {
       addMessage("ai", String((res.reply ?? "(no reply)")).trim());
-      // B — store last reply
-      if (res && typeof res.reply === "string") {
-        window.LAST_AI_REPLY = res.reply;
+      if (typeof res.reply === "string") window.LAST_AI_REPLY = res.reply;
+  
+      // show preview table (HTML first, then plaintext)
+      if (typeof window.renderPreview === "function" && (res.preview_html || res.preview)) {
+        window.renderPreview(res.preview, res.preview_html);
       }
-      
-    if (typeof window.renderPreview === "function" && (res.preview_html || res.preview)) {
-      window.renderPreview(res.preview, res.preview_html);
-    }
-      }
-      if (res && res.sql && typeof window.renderSql === "function") {
+  
+      // show SQL if present
+      if (res.sql && typeof window.renderSql === "function") {
         window.renderSql(res.sql);
       }
     }
-    // ⬆⬆⬆
   
     if (statusEl) statusEl.textContent = "Ready";
   } catch (e) {
@@ -180,7 +177,6 @@ async function send(){
     sendBtn.disabled = false;
     scroller().scrollTop = scroller().scrollHeight;
   }
-}
 
 // Reset conversation (posts "reset" via /ask)
 async function resetConversation(){
@@ -274,8 +270,8 @@ document.querySelectorAll("[data-q]").forEach(btn => {
         }
     
         // ⬇⬇⬇ 2nd point goes here (guarded preview/SQL renderers)
-        if (res && res.preview && typeof window.renderPreview === "function") {
-          window.renderPreview(res.preview);
+        if (typeof window.renderPreview === "function" && (res.preview_html || res.preview)) {
+          window.renderPreview(res.preview, res.preview_html);
         }
         if (res && res.sql && typeof window.renderSql === "function") {
           window.renderSql(res.sql);
